@@ -1,3 +1,4 @@
+import { InstallAppButton } from '@/components/common/InstallAppButton';
 import { useEffect, useState } from 'react';
 import { ArrowRight, Eye, EyeOff, Loader2, CheckCircle2, AlertCircle, Info, Mail, Check, X } from 'lucide-react';
 import { Button } from '@/components/ui/button';
@@ -34,6 +35,9 @@ export function LoginPage({ onLoginSuccess }: { onLoginSuccess: (user: User) => 
   const [feedback, setFeedback] = useState<Feedback>(null); const [busy, setBusy] = useState(false);
   const [touched, setTouched] = useState(false);
   const [remember, setRemember] = useState(true);
+  const [sentTo, setSentTo] = useState<string | null>(null); // set after sign-up: shows the "Confirm your email" screen
+  const [cooldown, setCooldown] = useState(0);
+  useEffect(() => { if (cooldown <= 0) return; const t = setTimeout(() => setCooldown(c => c - 1), 1000); return () => clearTimeout(t); }, [cooldown]);
   const [fullName, setFullName] = useState(''); const [phone, setPhone] = useState(''); const [department, setDepartment] = useState(''); const [designation, setDesignation] = useState(''); const [supervisorId, setSupervisorId] = useState('');
   const [options, setOptions] = useState<SignupOptions | null>(null);
   useEffect(() => {
@@ -62,7 +66,10 @@ export function LoginPage({ onLoginSuccess }: { onLoginSuccess: (user: User) => 
     if (!confirmOk) return setFeedback({ tone: 'error', title: 'Passwords don’t match' });
     setBusy(true);
     try {
-      if (mode === 'signup') { const { error } = await supabase.auth.signUp({ email, password, options: { emailRedirectTo: window.location.origin + '/auth', data: { name: fullName.trim(), phone: phone.trim(), department, role_title: designation, supervisor_id: supervisorId || null } } }); if (error) throw error; setFeedback({ tone: 'success', title: 'Account created', text: `We sent a verification link to ${email}. Open it to activate your account.` }); }
+      if (mode === 'signup') { const { data, error } = await supabase.auth.signUp({ email, password, options: { emailRedirectTo: window.location.origin + '/auth', data: { name: fullName.trim(), phone: phone.trim(), department, role_title: designation, supervisor_id: supervisorId || null } } }); if (error) throw error;
+        if (data.user && data.user.identities?.length === 0) { setFeedback({ tone: 'info', title: 'Account already exists', text: 'Sign in instead, or reset your password.' }); }
+        else if (data.session) { setRememberMe(remember); const r = await AuthService.login(email, password); if (!r.success || !r.user) throw new Error(r.error); onLoginSuccess(r.user); } // email confirmation switched off
+        else { setPassword(''); setConfirm(''); setCooldown(60); setSentTo(email); } }
       else if (mode === 'reset') { const { error } = await supabase.auth.resetPasswordForEmail(email, { redirectTo: window.location.origin + '/auth?recovery=1' }); if (error) throw error; setFeedback({ tone: 'success', title: 'Check your inbox', text: 'We sent a secure link to set a new password.' }); }
       else if (mode === 'password') { const { error } = await supabase.auth.updateUser({ password }); if (error) throw error; switchMode('login'); setFeedback({ tone: 'success', title: 'Password saved', text: 'You can now sign in with your new password.' }); }
       else { setRememberMe(remember); const r = await AuthService.login(email, password); if (!r.success || !r.user) throw new Error(r.error); onLoginSuccess(r.user); }
@@ -70,6 +77,13 @@ export function LoginPage({ onLoginSuccess }: { onLoginSuccess: (user: User) => 
     finally { setBusy(false); }
   }
 
+  const goToSignIn = () => { setSentTo(null); setPassword(''); switchMode('login'); };
+  const resend = async () => {
+    if (!sentTo || cooldown > 0) return;
+    const { error } = await supabase.auth.resend({ type: 'signup', email: sentTo, options: { emailRedirectTo: window.location.origin + '/auth' } });
+    if (error) setFeedback(friendly(error.message)); else setFeedback({ tone: 'success', title: 'Email sent again' });
+    setCooldown(60);
+  };
   const heading = { login: ['Welcome back', 'Sign in to continue to your reporting workspace.'], signup: ['Create your staff account', 'Fill in your details to start submitting your reports.'], reset: ['Reset your password', 'We’ll email you a secure link.'], password: ['Choose a new password', 'Set a strong password for your account.'] }[mode];
   const FIcon = feedback?.tone === 'success' ? CheckCircle2 : feedback?.tone === 'info' ? Info : AlertCircle;
 
@@ -89,6 +103,19 @@ export function LoginPage({ onLoginSuccess }: { onLoginSuccess: (user: User) => 
       <main className="flex min-h-screen flex-col justify-center px-5 py-10 sm:px-10">
         <div className="mx-auto w-full max-w-[400px] fade-up">
           <div className="mb-10 flex items-center gap-3 lg:hidden"><img src={logo} alt="Plants & Pure" className="size-10 object-contain" /><div><p className="font-semibold">Plants & Pure</p><p className="text-xs text-muted-foreground">Staff reporting & performance</p></div></div>
+          {sentTo ? (
+            <div className="text-center">
+              <div className="mx-auto mb-6 grid size-16 place-items-center rounded-full bg-primary/10 text-primary"><Mail className="size-8" /></div>
+              <h2 className="text-[1.75rem] font-semibold tracking-tight">Confirm your email</h2>
+              <p className="mt-2 text-sm text-muted-foreground">We sent a confirmation link to</p>
+              <p className="mt-1 break-all font-semibold">{sentTo}</p>
+              <p className="mt-4 text-sm leading-relaxed text-muted-foreground">Open the email and tap the link to activate your account. Then come back here and sign in.</p>
+              <Button type="button" className="mt-8 h-11 w-full text-[14px]" onClick={goToSignIn}>Sign in<ArrowRight className="size-4" /></Button>
+              {feedback && <p role="status" className={cn('mt-5 text-[13px] font-medium', feedback.tone === 'error' ? 'text-destructive' : 'text-success')}>{feedback.title}{feedback.tone === 'error' && feedback.text ? ` — ${feedback.text}` : ''}</p>}
+              <p className="mt-6 text-[13px] text-muted-foreground">Didn’t get it? Check your spam folder, or <button type="button" disabled={cooldown > 0} onClick={() => void resend()} className="font-medium text-primary hover:underline disabled:cursor-not-allowed disabled:opacity-50">{cooldown > 0 ? `resend in ${cooldown}s` : 'resend the email'}</button>.</p>
+              <button type="button" onClick={() => { setSentTo(null); switchMode('signup'); }} className="mt-3 text-[13px] text-muted-foreground hover:text-foreground hover:underline">Use a different email</button>
+            </div>
+          ) : (<>
           <h2 className="text-[1.75rem] font-semibold tracking-tight">{heading[0]}</h2>
           <p className="mt-1.5 text-sm text-muted-foreground">{heading[1]}</p>
 
@@ -154,6 +181,8 @@ export function LoginPage({ onLoginSuccess }: { onLoginSuccess: (user: User) => 
             {mode === 'login' ? <>New to Plants & Pure? <button onClick={() => switchMode('signup')} className="font-medium text-primary hover:underline">Create an account</button></> : <>Already have an account? <button onClick={() => switchMode('login')} className="font-medium text-primary hover:underline">Sign in</button></>}
           </p>
 
+          <InstallAppButton />
+          </>)}
         </div>
       </main>
     </div>

@@ -10,6 +10,7 @@ import { DisplaySettingsService, type ThemePreference } from '../../services/dis
 import { DisplaySettingsModal } from '../common/DisplaySettingsModal';
 import { initials } from './Sidebar';
 import { PhoneAlertsRow } from './PhoneAlertsRow';
+import { InstallAppButton } from '@/components/common/InstallAppButton';
 
 interface HeaderProps {
   currentUser: User;
@@ -97,6 +98,7 @@ export const Header: React.FC<HeaderProps> = ({ currentUser, onOpenMobile, activ
               <div><p className="text-sm font-semibold">Notifications</p><p className="text-[11.5px] text-muted-foreground">{unread ? `${unread} unread` : 'You’re all caught up'}</p></div>
               {unread > 0 && <Button variant="ghost" size="sm" className="h-8 text-xs" onClick={async () => { await NotificationService.markAllAsRead(currentUser.id); onRefreshNotifications(); }}><CheckCheck className="size-3.5" />Mark all read</Button>}
             </div>
+            <InstallAppButton variant="row" />
             <PhoneAlertsRow />
             <div className="max-h-[360px] overflow-y-auto">
               {notifications.length === 0 ? (
