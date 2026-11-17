@@ -1,4 +1,5 @@
 import { reportingWeekNumber } from '@/utils/reportingWeek';
+import { startOfISOWeek, format as formatDate } from 'date-fns';
 import { toast } from 'sonner';
 import { readLocalDraft, writeLocalDraft, clearLocalDraft } from '@/lib/localDraft';
 import { Button } from "@/components/ui/button";
@@ -137,6 +138,10 @@ export const DailyReportForm: React.FC<DailyReportFormProps> = ({
   const dateObj = new Date(date + 'T00:00:00');
   const dayOfWeekName = dateObj.toLocaleDateString('en-GB', { weekday: 'long' });
   const isWeekend = dateObj.getDay() === 0 || dateObj.getDay() === 6;
+  // Back-dating is allowed for earlier days of the CURRENT reporting week only; future dates are never allowed.
+  const todayStr = formatDate(new Date(), 'yyyy-MM-dd');
+  const weekStartStr = formatDate(startOfISOWeek(new Date()), 'yyyy-MM-dd');
+  const minDate = existingReport && existingReport.date < weekStartStr ? existingReport.date : weekStartStr;
 
   // Calculate week number
   const getWeekNumber = (d: Date) => reportingWeekNumber(d);
@@ -261,6 +266,15 @@ export const DailyReportForm: React.FC<DailyReportFormProps> = ({
   // Validation logic
   const validate = (): boolean => {
     setValidationError(null);
+
+    if (date > todayStr) {
+      toast.error('Date not allowed', { description: 'A report cannot be dated in the future.' });
+      return false;
+    }
+    if (date < minDate) {
+      toast.error('Date not allowed', { description: `You can only back-date reports within the current reporting week (Week ${reportingWeekNumber(new Date())}).` });
+      return false;
+    }
 
     if (isWeekend) {
       toast.error('Choose a weekday', { description: 'Ordinary daily reports are accepted Monday through Friday.' });
@@ -515,6 +529,8 @@ export const DailyReportForm: React.FC<DailyReportFormProps> = ({
             <input
               type="date"
               value={date}
+              min={minDate}
+              max={todayStr}
               onChange={(e) => setDate(e.target.value)}
               className="w-full px-3 py-2 text-xs rounded-lg border border-border  bg-card  text-foreground  font-medium focus:ring-2 focus:ring-primary"
               required
@@ -524,6 +540,9 @@ export const DailyReportForm: React.FC<DailyReportFormProps> = ({
                 Weekend dates are non-reporting days.
               </span>
             )}
+            <span className="text-[11px] text-muted-foreground mt-1 block">
+              You can fill in earlier days of this week (Week {reportingWeekNumber(new Date())}).
+            </span>
           </div>
 
           <div>

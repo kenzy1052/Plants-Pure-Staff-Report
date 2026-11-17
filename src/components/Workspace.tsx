@@ -3,6 +3,7 @@ import { startOfISOWeek } from 'date-fns';
 import { reportingWeekNumber, setReportingStart } from '@/utils/reportingWeek';
 import { dbService } from '@/services/db';
 import { syncPushSubscription, pushSupported } from '@/lib/pushClient';
+import { startUpdateWatcher } from '@/lib/appUpdate';
 import { useNavigate, useRouterState } from '@tanstack/react-router';
 import { Sidebar } from './layout/Sidebar';
 import { Header } from './layout/Header';
@@ -51,6 +52,7 @@ export default function Workspace() {
  // Phone alerts (work even when the app is closed): keep this device registered, and ask again after a week if skipped.
  useEffect(()=>{ if(!user||isDemoSession()||!pushSupported())return; if(Notification.permission==='granted'){void syncPushSubscription(false);return;} if(Notification.permission!=='default')return; const asked=Number(localStorage.getItem('pp_notif_asked')||0); if(asked&&Date.now()-asked<7*864e5)return; const t=window.setTimeout(()=>{localStorage.setItem('pp_notif_asked',String(Date.now()));toast('Get report alerts on your phone',{description:'Know straight away when a report is submitted, approved or returned — even when the app is closed.',duration:20000,action:{label:'Turn on',onClick:()=>{void syncPushSubscription(true).then(ok=>ok?toast.success('Alerts are on for this device'):toast.error('Alerts were not turned on',{description:'Allow notifications for this site in your browser settings.'}));}}});},4000); return()=>window.clearTimeout(t); },[user]);
  useEffect(()=>{ setReportingStart(settings?.reportingStartDate); },[settings]);
+ useEffect(()=>startUpdateWatcher(),[]);
  // Deadline reminders: from one hour before the daily / weekly deadline, if nothing has been submitted.
  useEffect(()=>{ if(!user||!settings||isDemoSession()||!seenNotifs.current)return; const now=new Date();const pad=(x:number)=>String(x).padStart(2,'0');const today=`${now.getFullYear()}-${pad(now.getMonth()+1)}-${pad(now.getDate())}`;
   const dayName=now.toLocaleDateString('en-GB',{weekday:'long'});const mins=(t:string)=>{const [h,m]=t.split(':').map(Number);return (h||0)*60+(m||0);};const nowMin=now.getHours()*60+now.getMinutes();

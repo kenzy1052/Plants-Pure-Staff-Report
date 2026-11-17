@@ -14,7 +14,7 @@ import {
   FileSpreadsheet
 } from 'lucide-react';
 import { DailyReport, WeeklyReport, User as UserType, Employee } from '../../types';
-import { downloadCSV, exportReportsToExcel } from '../../utils/exportUtils';
+import { downloadCSV, exportReportsToExcel, exportReportsToWord } from '../../utils/exportUtils';
 
 interface UnifiedRecord {
   id: string;
@@ -191,6 +191,19 @@ export const ReportRecordsSearch: React.FC<ReportRecordsSearchProps> = ({
           </Button>
           <Button variant="legacy"
             onClick={() => {
+              const approvedDaily = dailyReports.filter(r => r.status === 'approved');
+              const approvedWeekly = weeklyReports.filter(r => r.status === 'approved');
+              if (!approvedDaily.length && !approvedWeekly.length) { toast.info('No approved reports yet'); return; }
+              void exportReportsToWord(approvedDaily, approvedWeekly, undefined, `PlantsAndPure_Approved_Reports_${new Date().toISOString().split('T')[0]}.docx`);
+            }}
+            className="flex items-center gap-1.5 px-3 py-2 bg-primary text-primary-foreground text-xs font-semibold rounded-lg transition-colors hover:opacity-90"
+            title="Download every approved report as one formatted Word document, grouped by week"
+          >
+            <FileText className="w-3.5 h-3.5" />
+            <span>Approved reports (Word)</span>
+          </Button>
+          <Button variant="legacy"
+            onClick={() => {
               const matchedDailyIds = new Set(filteredRecords.filter(r => r.type === 'daily').map(r => r.id));
               const matchedWeeklyIds = new Set(filteredRecords.filter(r => r.type === 'weekly').map(r => r.id));
               const dailyToExport = dailyReports.filter(d => matchedDailyIds.has(d.id));
@@ -207,6 +220,18 @@ export const ReportRecordsSearch: React.FC<ReportRecordsSearchProps> = ({
           >
             <FileSpreadsheet className="w-3.5 h-3.5 text-success " />
             <span>Export Excel (.xlsx)</span>
+          </Button>
+          <Button variant="legacy"
+            onClick={() => {
+              const matchedDailyIds = new Set(filteredRecords.filter(r => r.type === 'daily').map(r => r.id));
+              const matchedWeeklyIds = new Set(filteredRecords.filter(r => r.type === 'weekly').map(r => r.id));
+              void exportReportsToWord(dailyReports.filter(d => matchedDailyIds.has(d.id)), weeklyReports.filter(w => matchedWeeklyIds.has(w.id)), undefined, `PlantsAndPure_Records_${new Date().toISOString().split('T')[0]}.docx`);
+            }}
+            className="flex items-center gap-1.5 px-3 py-2 bg-info-soft border border-info hover:bg-brand-wash text-info text-xs font-semibold rounded-lg transition-colors"
+            title="Download the filtered records as a formatted Word document"
+          >
+            <FileText className="w-3.5 h-3.5" />
+            <span>Export Word (.docx)</span>
           </Button>
           <Button variant="legacy"
             onClick={handleExportSearchResults}

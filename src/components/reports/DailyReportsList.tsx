@@ -13,7 +13,7 @@ import {
   Download
 } from 'lucide-react';
 import { DailyReport, User } from '../../types';
-import { exportDailyReportsToCSV, exportReportsToExcel } from '../../utils/exportUtils';
+import { exportDailyReportsToCSV, exportReportsToExcel, exportReportsToWord } from '../../utils/exportUtils';
 
 interface DailyReportsListProps {
   reports: DailyReport[];
@@ -92,6 +92,14 @@ export const DailyReportsList: React.FC<DailyReportsListProps> = ({
           >
             <FileSpreadsheet className="w-3.5 h-3.5 text-success " />
             <span>Export Excel (.xlsx)</span>
+          </Button>
+          <Button variant="legacy"
+            onClick={() => exportReportsToWord(filteredReports, [])}
+            className="flex items-center gap-1.5 px-3 py-2 bg-info-soft border border-info hover:bg-brand-wash text-info text-xs font-semibold rounded-lg transition-colors"
+            title="Download a formatted Word (.docx) document, grouped by week"
+          >
+            <FileText className="w-3.5 h-3.5" />
+            <span>Export Word (.docx)</span>
           </Button>
           <Button variant="legacy"
             onClick={() => exportDailyReportsToCSV(filteredReports)}
