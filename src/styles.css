@@ -194,6 +194,7 @@ html.dark[data-high-contrast="true"] { --border: oklch(0.55 0.02 55); --muted-fo
 /* Auth experience */
 .auth-art-panel { background: linear-gradient(145deg, oklch(.92 .12 112), oklch(.79 .15 108) 48%, oklch(.65 .16 94)); }
 .auth-art-image { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; object-position: center; filter: saturate(1.08) contrast(1.02); animation: auth-art-float 12s ease-in-out infinite alternate; transform: scale(1.035); }
+.auth-form-pane { scrollbar-gutter: stable; }
 .auth-art-glow { position: absolute; z-index: 1; width: 22rem; height: 22rem; border-radius: 999px; background: oklch(.98 .08 95 / .42); filter: blur(42px); pointer-events: none; }
 .auth-art-glow-one { top: -8rem; left: -7rem; animation: auth-glow-one 10s ease-in-out infinite alternate; }
 .auth-art-glow-two { right: -8rem; bottom: -8rem; background: oklch(.55 .16 42 / .2); animation: auth-glow-two 13s ease-in-out infinite alternate; }
@@ -209,6 +210,7 @@ html.dark[data-high-contrast="true"] { --border: oklch(0.55 0.02 55); --muted-fo
 @keyframes auth-glow-two { from { transform: translate3d(0,0,0) scale(1); opacity: .5; } to { transform: translate3d(-1.5rem, -1rem, 0) scale(1.15); opacity: .8; } }
 @keyframes app-loader-pulse { 0%, 100% { opacity: .58; transform: scale(.92) rotate(-4deg); } 50% { opacity: 1; transform: scale(1.04) rotate(3deg); } }
 @media (prefers-reduced-motion: reduce) { .auth-art-image, .auth-art-glow, .app-loader-mark { animation: none; } }
+@media (min-width: 1024px) { .auth-form-pane > div { min-height: min-content; } }
 
 /* Plants and Pure visual refresh: light glassmorphism system */
 :root {
