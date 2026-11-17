@@ -28,4 +28,7 @@ export default defineConfig(({ command }) => ({
     tsconfigPaths: true,
     dedupe: ["react", "react-dom", "@tanstack/react-router"],
   },
+  server: {
+    allowedHosts: [".manus.computer"],
+  },
 }));
