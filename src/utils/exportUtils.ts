@@ -1,5 +1,6 @@
 import type { DailyReport, WeeklyReport, OrganisationSettings } from '@/types';
-import { getISOWeek, getISOWeekYear, startOfISOWeek, format, addDays, parseISO } from 'date-fns';
+import type { Worksheet } from 'exceljs';
+import { startOfISOWeek, format, addDays, parseISO } from 'date-fns';
 import { reportingWeekNumber } from './reportingWeek';
 
 type Report = DailyReport | WeeklyReport;
@@ -48,22 +49,253 @@ export async function exportReportPdf(report:Report){await deliverFile(await mak
 export function downloadCSV(filename:string,rows:(string|number)[][]){const safe=(v:string|number)=>{let t=String(v??'');if(/^[=+@-]/.test(t))t="'"+t;return '"'+t.replace(/"/g,'""')+'"';};downloadBlob(new Blob(['\uFEFF'+rows.map(row=>row.map(safe).join(',')).join('\r\n')],{type:'text/csv;charset=utf-8'}),filename);}
 export function exportDailyReportsToCSV(reports:DailyReport[]){downloadCSV('Daily-reports.csv',[['Report','Employee','Date','Status','Objectives','Activities'],...reports.map(r=>[r.reportCode,r.employeeName,r.date,r.status,r.objectives.length,r.activities.length])]);}
 export function exportWeeklyReportsToCSV(reports:WeeklyReport[]){downloadCSV('Weekly-reports.csv',[['Report','Employee','Week','Year','Status','Completion'],...reports.map(r=>[r.reportCode,r.employeeName,r.weekNumber,r.year,r.status,r.completionRate])]);}
-export async function makeWorkbook(daily:DailyReport[],weekly:WeeklyReport[],settings?:OrganisationSettings){
- const {Workbook}=await import('exceljs');const workbook=new Workbook();workbook.creator='Plants & Pure';
- const groups=new Map<string,{monday:Date;daily:DailyReport[];weekly:WeeklyReport[]}>();
- const group=(date:string)=>{const d=parseISO(date);const key=`${getISOWeekYear(d)}-W${String(getISOWeek(d)).padStart(2,'0')}`;let value=groups.get(key);if(!value){value={monday:startOfISOWeek(d),daily:[],weekly:[]};groups.set(key,value);}return {key,value};};
- daily.forEach(r=>group(r.date).value.daily.push(r));weekly.forEach(r=>group(r.startDate).value.weekly.push(r));
- for(const [key,g]of [...groups.entries()].sort((a,b)=>b[0].localeCompare(a[0]))){
-  const sheet=workbook.addWorksheet(`Week ${reportingWeekNumber(g.monday)}`,{views:[{state:'frozen',ySplit:3}],pageSetup:{paperSize:9,orientation:'landscape',fitToPage:true,fitToWidth:1,fitToHeight:0}});
-  sheet.columns=[{width:24},{width:38},{width:25},{width:35},{width:32}];
-  const heading=(text:string,main=false)=>{const row=sheet.addRow([text]);sheet.mergeCells(row.number,1,row.number,5);row.height=main?30:25;row.font={name:'Calibri',size:main?16:12,bold:true,color:{argb:'FFFFFFFF'}};row.fill={type:'pattern',pattern:'solid',fgColor:{argb:main?'FF174D35':'FF39745B'}};row.alignment={vertical:'middle',wrapText:true};};
-  heading(settings?.organisationName??'Plants and Pure',true);heading(`Week ${reportingWeekNumber(g.monday)}  ·  ${format(g.monday,'d MMM')} – ${format(addDays(g.monday,6),'d MMM yyyy')}`);sheet.addRow(['Employee / Time','Activity / Planned task','Status / Quantity','Results / Achievements','Outstanding tasks / Resources']);
-  for(const r of g.weekly){heading(`Weekly summary — ${r.employeeName}`);for(const section of reportSections(r).slice(1)) {sheet.addRow([section.heading,section.lines.join('\n')]);}}
-  for(let i=0;i<7;i++){const date=format(addDays(g.monday,i),'yyyy-MM-dd');heading(`${format(addDays(g.monday,i),'EEEE')} — ${date}`);const reports=g.daily.filter(r=>r.date===date);if(!reports.length)sheet.addRow(['No report recorded.']);for(const r of reports){heading(`${r.employeeName} · ${r.reportCode} · ${r.status}`);for(const o of r.objectives)sheet.addRow(['Objective',o.objective,o.status,o.resultsFigures,o.reasonIfNotCompleted??'']);for(const a of r.activities)sheet.addRow([a.time,a.activityTask,a.quantityFigures,a.outcome,a.placePersonPlatform]);for(const c of r.challenges)sheet.addRow([c.whenHappened,c.problemEncountered,c.resolved?'Resolved':'Outstanding',c.actionTaken,'']);for(const p of r.tomorrowPlans)sheet.addRow(['Planned task',p.plannedTask,'Planned',p.approvalsRequired,p.resourcesNeeded]);}}
-  sheet.eachRow(row=>{if(!row.font?.bold){row.font={name:'Calibri',size:11};row.alignment={vertical:'top',wrapText:true};let lines=1;row.eachCell((cell,index)=>{const width=sheet.getColumn(index).width??24;lines=Math.max(lines,...String(cell.value??'').split('\n').map(text=>Math.ceil(text.length/Math.max(10,width-3))));});row.height=Math.max(32,lines*16+12);}row.eachCell(cell=>{cell.border={bottom:{style:'hair',color:{argb:'FFDCE6DF'}}};});});
-  sheet.autoFilter={from:'A3',to:'E3'};
- }
- if(!groups.size){const s=workbook.addWorksheet('Overview');s.addRow(['Plants & Pure']);s.addRow(['No reports recorded.']);}
- return workbook;
+// =====================================================================
+// Professional Excel workbook: a Summary page, then one page (tab) per week.
+// =====================================================================
+const C = { ink: 'FF231E1C', coral: 'FFD9533B', peach: 'FFFFF3EC', sand: 'FFFBF8F5', line: 'FFEAE2DC', muted: 'FF77716D', white: 'FFFFFFFF', green: 'FF2E7D32', amber: 'FFB26A00', red: 'FFC62828', band: 'FFF4E4DC' };
+const COLS = [16, 44, 20, 38, 34];
+type WeekGroup = { key: string; week: number; monday: Date; daily: DailyReport[]; weekly: WeeklyReport[] };
+
+function groupByWeek(daily: DailyReport[], weekly: WeeklyReport[]): WeekGroup[] {
+  const map = new Map<string, WeekGroup>();
+  const add = (date: string) => {
+    const monday = startOfISOWeek(parseISO(date)); const key = format(monday, 'yyyy-MM-dd');
+    let g = map.get(key);
+    if (!g) { g = { key, week: reportingWeekNumber(monday), monday, daily: [], weekly: [] }; map.set(key, g); }
+    return g;
+  };
+  daily.forEach(r => add(r.date).daily.push(r));
+  weekly.forEach(r => add(r.startDate).weekly.push(r));
+  return [...map.values()].sort((a, b) => a.key.localeCompare(b.key));
 }
-export async function exportReportsToExcel(daily:DailyReport[],weekly:WeeklyReport[],settings?:OrganisationSettings,filename='Plants-and-Pure-Reports.xlsx'){const workbook=await makeWorkbook(daily,weekly,settings);const bytes=await workbook.xlsx.writeBuffer();await deliverFile(new Blob([new Uint8Array(bytes)],{type:'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'}),filename);}
+
+const cap = (s: string) => s.charAt(0).toUpperCase() + s.slice(1);
+const statusColor = (s: string) => { const t = s.toLowerCase(); if (/not done|outstanding|returned|rejected/.test(t)) return C.red; if (/partly|pending|submitted|draft/.test(t)) return C.amber; return C.green; };
+const solid = (argb: string) => ({ type: 'pattern' as const, pattern: 'solid' as const, fgColor: { argb } });
+const edge = { style: 'thin' as const, color: { argb: C.line } };
+const box = () => ({ top: edge, bottom: edge, left: edge, right: edge });
+const heightFor = (cells: { text: string; width: number }[], min = 20) => {
+  let lines = 1;
+  for (const c of cells) { const w = Math.max(8, c.width * 1.15); for (const part of String(c.text ?? '').split('\n')) lines = Math.max(lines, Math.max(1, Math.ceil(part.length / w))); }
+  return Math.max(min, lines * 15 + 7);
+};
+
+function band(ws: Worksheet, text: string, o: { fill: string; color?: string; size?: number; height?: number; bold?: boolean; italic?: boolean; cols?: number }) {
+  const row = ws.addRow([text]);
+  ws.mergeCells(row.number, 1, row.number, o.cols ?? 5);
+  const cell = row.getCell(1);
+  cell.font = { name: 'Calibri', size: o.size ?? 12, bold: o.bold ?? true, italic: o.italic ?? false, color: { argb: o.color ?? C.white } };
+  cell.fill = solid(o.fill);
+  cell.alignment = { vertical: 'middle', horizontal: 'left', indent: 1, wrapText: true };
+  row.height = o.height ?? 24;
+  return row;
+}
+
+function split(ws: Worksheet, left: string, right: string, fill: string, color: string) {
+  const row = ws.addRow([left, '', '', right, '']);
+  ws.mergeCells(row.number, 1, row.number, 3); ws.mergeCells(row.number, 4, row.number, 5);
+  for (const [col, align] of [[1, 'left'], [4, 'right']] as const) {
+    const c = row.getCell(col);
+    c.font = { name: 'Calibri', size: 11.5, bold: true, color: { argb: color } }; c.fill = solid(fill);
+    c.alignment = { vertical: 'middle', horizontal: align, indent: 1, wrapText: true };
+  }
+  row.height = 24;
+}
+
+function table(ws: Worksheet, title: string, headers: string[], rows: string[][], statusCol = -1) {
+  if (!rows.length) return;
+  const t = ws.addRow([title]); ws.mergeCells(t.number, 1, t.number, 5);
+  t.getCell(1).font = { name: 'Calibri', size: 11, bold: true, color: { argb: C.coral } };
+  t.getCell(1).alignment = { vertical: 'bottom', indent: 1 }; t.height = 22;
+  const h = ws.addRow(headers); h.height = 22;
+  for (let c = 1; c <= 5; c++) {
+    const cell = h.getCell(c);
+    cell.font = { name: 'Calibri', size: 10.5, bold: true, color: { argb: C.ink } };
+    cell.fill = solid(C.peach); cell.border = box(); cell.alignment = { vertical: 'middle', wrapText: true, indent: 0 };
+  }
+  rows.forEach((values, i) => {
+    const padded = [...values, '', '', '', '', ''].slice(0, 5);
+    const row = ws.addRow(padded);
+    for (let c = 1; c <= 5; c++) {
+      const cell = row.getCell(c);
+      cell.alignment = { vertical: 'top', wrapText: true };
+      cell.border = box();
+      cell.font = c - 1 === statusCol ? { name: 'Calibri', size: 11, bold: true, color: { argb: statusColor(padded[c - 1]) } } : { name: 'Calibri', size: 11 };
+      if (i % 2 === 1) cell.fill = solid(C.sand);
+    }
+    row.height = heightFor(padded.map((text, k) => ({ text, width: COLS[k] })));
+  });
+}
+
+function spacer(ws: Worksheet, h = 10) { ws.addRow([]).height = h; }
+
+function dailyBlock(ws: Worksheet, r: DailyReport) {
+  split(ws, `${r.employeeName}  ·  ${r.roleTitle}`, `${r.reportCode}  ·  ${cap(r.status)}  ·  ${r.startTime}–${r.endTime}`, C.coral, C.white);
+  table(ws, 'Objectives and achievements', ['#', 'Objective', 'Status', 'Results / figures', 'Reason if not completed'], r.objectives.map((o, i) => [String(i + 1), o.objective, o.status, o.resultsFigures || '—', o.reasonIfNotCompleted || '—']), 2);
+  table(ws, 'Activities', ['Time', 'Activity / task', 'Quantity', 'Outcome', 'Place / person / platform'], r.activities.map(a => [a.time, a.activityTask, a.quantityFigures || '—', a.outcome || '—', a.placePersonPlatform || '—']));
+  table(ws, 'Challenges and actions', ['When', 'Problem encountered', 'Status', 'Action taken', ''], r.challenges.map(c => [c.whenHappened, c.problemEncountered, c.resolved ? 'Resolved' : 'Outstanding', c.actionTaken || '—', '']), 2);
+  table(ws, 'Planned for tomorrow', ['#', 'Planned task', 'Approvals', 'Resources needed', ''], r.tomorrowPlans.map((p, i) => [String(i + 1), p.plannedTask, p.approvalsRequired || 'None', p.resourcesNeeded || '—', '']));
+  for (const rv of r.reviews ?? []) band(ws, `Review — ${rv.reviewerName}: ${cap(String(rv.decision))}${rv.rating ? ` (${rv.rating}/5)` : ''}${rv.comments ? ` — ${rv.comments}` : ''}`, { fill: C.band, color: C.ink, size: 10.5, bold: false, italic: true, height: 22 });
+  spacer(ws);
+}
+
+function weeklyBlock(ws: Worksheet, r: WeeklyReport) {
+  split(ws, `Weekly summary  ·  ${r.employeeName}`, `${r.reportCode}  ·  ${cap(r.status)}`, C.ink, C.white);
+  const labels: Record<string, string> = { overview: 'Overview', achievements: 'Achievements', shortfalls: 'Shortfalls', keyFigures: 'Key figures', majorActivities: 'Major activities' };
+  for (const [key, value] of Object.entries(r.summaryOfWeek)) {
+    const row = ws.addRow([labels[key] ?? key, String(value ?? '') || '—']);
+    ws.mergeCells(row.number, 2, row.number, 5);
+    row.getCell(1).font = { name: 'Calibri', size: 11, bold: true, color: { argb: C.ink } }; row.getCell(1).fill = solid(C.peach);
+    row.getCell(1).alignment = { vertical: 'top', wrapText: true, indent: 1 };
+    row.getCell(2).font = { name: 'Calibri', size: 11 }; row.getCell(2).alignment = { vertical: 'top', wrapText: true };
+    for (let c = 1; c <= 5; c++) row.getCell(c).border = box();
+    row.height = heightFor([{ text: String(value ?? ''), width: COLS[1] + COLS[2] + COLS[3] + COLS[4] }], 24);
+  }
+  table(ws, 'Key results and figures', ['#', 'Item / activity', 'Target', 'Actual', 'Variance / comments'], r.keyResultsFigures.map((k, i) => [String(i + 1), k.itemActivity, String(k.target), String(k.actual), `${k.variance}${k.comments ? ` — ${k.comments}` : ''}`]));
+  table(ws, 'Challenges and actions', ['#', 'Problem', 'Status', 'Action taken', ''], r.challengesGrouped.map((c, i) => [String(i + 1), c.problem, c.resolved ? 'Resolved' : 'Outstanding', c.actionTaken || '—', '']), 2);
+  table(ws, 'Plan for next week', ['#', 'Planned activity', '', 'Recommendation', 'Resources needed'], r.recommendationsNextWeek.map((p, i) => [String(i + 1), p.plannedActivity, '', p.recommendation || '—', p.resourcesNeeded || '—']));
+  if (r.additionalRecommendations) band(ws, `Additional recommendations — ${r.additionalRecommendations}`, { fill: C.band, color: C.ink, size: 10.5, bold: false, italic: true, height: 30 });
+  spacer(ws);
+}
+
+function printSetup(ws: Worksheet, titleRows: string) {
+  ws.pageSetup = { paperSize: 9, orientation: 'landscape', fitToPage: true, fitToWidth: 1, fitToHeight: 0, printTitlesRow: titleRows, margins: { left: 0.4, right: 0.4, top: 0.6, bottom: 0.6, header: 0.3, footer: 0.3 } };
+  ws.headerFooter.oddFooter = '&L&"Calibri,Italic"&9Plants && Pure — Confidential&R&"Calibri,Italic"&9Page &P of &N';
+}
+
+export async function makeWorkbook(daily: DailyReport[], weekly: WeeklyReport[], settings?: OrganisationSettings) {
+  const { Workbook } = await import('exceljs');
+  const wb = new Workbook(); wb.creator = 'Plants & Pure'; wb.created = new Date();
+  const org = (settings?.organisationName ?? 'Plants & Pure Limited').toUpperCase();
+  const groups = groupByWeek(daily, weekly);
+
+  // ---- Summary page ----
+  const sm = wb.addWorksheet('Summary', { views: [{ state: 'frozen', ySplit: 3, showGridLines: false }] });
+  sm.columns = [{ width: 10 }, { width: 28 }, { width: 16 }, { width: 16 }, { width: 14 }, { width: 18 }, { width: 18 }, { width: 40 }];
+  band(sm, org, { fill: C.ink, size: 18, height: 34, cols: 8 });
+  band(sm, 'Staff reporting summary', { fill: C.coral, size: 12, height: 24, cols: 8 });
+  band(sm, `Generated ${format(new Date(), 'd MMM yyyy')}  ·  ${groups.length} reporting week${groups.length === 1 ? '' : 's'}`, { fill: C.band, color: C.ink, size: 10.5, bold: false, italic: true, height: 22, cols: 8 });
+  spacer(sm);
+  const head = sm.addRow(['Week', 'Period', 'Daily reports', 'Weekly reports', 'Approved', 'Awaiting review', 'Returned / draft', 'Staff reporting']);
+  head.height = 24;
+  head.eachCell(cell => { cell.font = { name: 'Calibri', size: 11, bold: true, color: { argb: C.white } }; cell.fill = solid(C.ink); cell.alignment = { vertical: 'middle', horizontal: 'center', wrapText: true }; cell.border = box(); });
+  groups.forEach((g, i) => {
+    const all = [...g.daily, ...g.weekly];
+    const staff = [...new Set(all.map(r => r.employeeName))].join(', ');
+    const row = sm.addRow([`Week ${g.week}`, `${format(g.monday, 'd MMM')} – ${format(addDays(g.monday, 6), 'd MMM yyyy')}`, g.daily.length, g.weekly.length, all.filter(r => r.status === 'approved').length, all.filter(r => r.status === 'submitted').length, all.filter(r => r.status !== 'approved' && r.status !== 'submitted').length, staff]);
+    row.eachCell({ includeEmpty: true }, (cell, c) => {
+      cell.font = { name: 'Calibri', size: 11, bold: c === 1 }; cell.border = box();
+      cell.alignment = { vertical: 'middle', horizontal: c === 2 || c === 8 ? 'left' : 'center', wrapText: true };
+      if (i % 2 === 1) cell.fill = solid(C.sand);
+    });
+    row.height = heightFor([{ text: staff, width: 40 }], 22);
+  });
+  if (!groups.length) { const r = sm.addRow(['No reports recorded.']); sm.mergeCells(r.number, 1, r.number, 8); r.getCell(1).font = { italic: true, color: { argb: C.muted } }; }
+  printSetup(sm, '1:3');
+
+  // ---- One page per week ----
+  for (const g of groups) {
+    const ws = wb.addWorksheet(`Week ${g.week}`, { views: [{ state: 'frozen', ySplit: 3, showGridLines: false }] });
+    ws.columns = COLS.map(width => ({ width }));
+    band(ws, org, { fill: C.ink, size: 18, height: 34 });
+    band(ws, `Week ${g.week}   ·   ${format(g.monday, 'd MMM')} – ${format(addDays(g.monday, 6), 'd MMM yyyy')}`, { fill: C.coral, size: 13, height: 26 });
+    const all = [...g.daily, ...g.weekly];
+    band(ws, `Daily reports: ${g.daily.length}   ·   Weekly reports: ${g.weekly.length}   ·   Approved: ${all.filter(r => r.status === 'approved').length}   ·   Awaiting review: ${all.filter(r => r.status === 'submitted').length}`, { fill: C.band, color: C.ink, size: 10.5, bold: false, italic: true, height: 22 });
+    spacer(ws);
+    for (const r of g.weekly) weeklyBlock(ws, r);
+    for (let i = 0; i < 7; i++) {
+      const day = addDays(g.monday, i); const date = format(day, 'yyyy-MM-dd');
+      const reports = g.daily.filter(r => r.date === date).sort((a, b) => a.employeeName.localeCompare(b.employeeName));
+      if (!reports.length && i > 4) continue; // skip empty weekend days
+      band(ws, `${format(day, 'EEEE')}  ·  ${format(day, 'd MMMM yyyy')}`, { fill: C.band, color: C.ink, size: 12.5, height: 26 });
+      if (!reports.length) { const n = ws.addRow(['No report recorded.']); ws.mergeCells(n.number, 1, n.number, 5); n.getCell(1).font = { name: 'Calibri', size: 10.5, italic: true, color: { argb: C.muted } }; n.getCell(1).alignment = { indent: 1 }; spacer(ws); continue; }
+      for (const r of reports) dailyBlock(ws, r);
+    }
+    printSetup(ws, '1:3');
+  }
+  return wb;
+}
+
+export async function exportReportsToExcel(daily: DailyReport[], weekly: WeeklyReport[], settings?: OrganisationSettings, filename = 'Plants-and-Pure-Reports.xlsx') {
+  const workbook = await makeWorkbook(daily, weekly, settings);
+  const bytes = await workbook.xlsx.writeBuffer();
+  await deliverFile(new Blob([new Uint8Array(bytes)], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }), filename);
+}
+
+// =====================================================================
+// Professional Word document: cover, then a section per week with tables.
+// =====================================================================
+export async function makeCombinedWord(daily: DailyReport[], weekly: WeeklyReport[], settings?: OrganisationSettings): Promise<Blob> {
+  const d = await import('docx');
+  const { Document, Paragraph, TextRun, HeadingLevel, Packer, Footer, PageNumber, AlignmentType, Table, TableRow, TableCell, WidthType, ShadingType, BorderStyle } = d;
+  const org = settings?.organisationName ?? 'Plants & Pure Limited';
+  const groups = groupByWeek(daily, weekly);
+  const W = 9906;
+  const hex = (argb: string) => argb.slice(2);
+  const edgeW = { style: BorderStyle.SINGLE, size: 4, color: hex(C.line) };
+  const borders = { top: edgeW, bottom: edgeW, left: edgeW, right: edgeW };
+  const fill = (color: string) => ({ type: ShadingType.CLEAR, color: 'auto', fill: color });
+  const text = (t: string, o: { bold?: boolean; size?: number; color?: string; italics?: boolean } = {}) => new TextRun({ text: t, bold: o.bold, size: o.size ?? 21, color: o.color, italics: o.italics });
+  const p = (t: string, o: { bold?: boolean; size?: number; color?: string; italics?: boolean; after?: number } = {}) => new Paragraph({ spacing: { after: o.after ?? 80 }, children: [text(t, o)] });
+
+  const makeTable = (headers: string[], rows: string[][], widths: number[], statusCol = -1) => new Table({
+    width: { size: W, type: WidthType.DXA }, columnWidths: widths,
+    rows: [
+      new TableRow({ tableHeader: true, children: headers.map((h, i) => new TableCell({ width: { size: widths[i], type: WidthType.DXA }, borders, shading: fill('FFF3EC'), margins: { top: 60, bottom: 60, left: 100, right: 100 }, children: [new Paragraph({ children: [text(h, { bold: true, size: 19, color: '231E1C' })] })] })) }),
+      ...rows.map((r, ri) => new TableRow({ cantSplit: true, children: r.map((t, i) => new TableCell({ width: { size: widths[i], type: WidthType.DXA }, borders, shading: ri % 2 ? fill('FBF8F5') : undefined, margins: { top: 60, bottom: 60, left: 100, right: 100 }, children: [new Paragraph({ children: [text(t, { size: 19, bold: i === statusCol, color: i === statusCol ? hex(statusColor(t)) : undefined })] })] })) })),
+    ],
+  });
+  const label = (t: string) => new Paragraph({ spacing: { before: 160, after: 80 }, keepNext: true, children: [text(t, { bold: true, size: 21, color: hex(C.coral) })] });
+
+  const body: (InstanceType<typeof Paragraph> | InstanceType<typeof Table>)[] = [
+    new Paragraph({ spacing: { before: 1800, after: 120 }, children: [text(org.toUpperCase(), { bold: true, size: 52, color: hex(C.coral) })] }),
+    new Paragraph({ spacing: { after: 120 }, children: [text('Staff Reports', { bold: true, size: 40, color: hex(C.ink) })] }),
+    p(`${groups.length} reporting week${groups.length === 1 ? '' : 's'}  ·  ${daily.length} daily and ${weekly.length} weekly report${daily.length + weekly.length === 1 ? '' : 's'}`, { size: 24, color: hex(C.muted) }),
+    p(`Generated ${format(new Date(), 'd MMMM yyyy')}`, { size: 22, color: hex(C.muted) }),
+  ];
+  if (!groups.length) body.push(p('No reports recorded.', { italics: true }));
+
+  groups.forEach((g, gi) => {
+    body.push(new Paragraph({
+      heading: HeadingLevel.HEADING_1, pageBreakBefore: true, shading: fill('231E1C'), spacing: { after: 200 },
+      children: [text(`  Week ${g.week}   ·   ${format(g.monday, 'd MMM')} – ${format(addDays(g.monday, 6), 'd MMM yyyy')}`, { bold: true, size: 30, color: 'FFFFFF' })],
+    }));
+    for (const r of g.weekly) {
+      body.push(new Paragraph({ heading: HeadingLevel.HEADING_2, spacing: { before: 240, after: 100 }, shading: fill('FFF3EC'), children: [text(`Weekly summary — ${r.employeeName}  (${r.reportCode} · ${cap(r.status)})`, { bold: true, size: 25, color: '231E1C' })] }));
+      for (const section of reportSections(r).slice(1)) {
+        body.push(label(section.heading));
+        for (const line of section.lines.length ? section.lines : ['None recorded.']) body.push(p(line));
+      }
+    }
+    for (let i = 0; i < 7; i++) {
+      const day = addDays(g.monday, i); const date = format(day, 'yyyy-MM-dd');
+      const reports = g.daily.filter(r => r.date === date).sort((a, b) => a.employeeName.localeCompare(b.employeeName));
+      if (!reports.length) continue;
+      body.push(new Paragraph({ heading: HeadingLevel.HEADING_2, spacing: { before: 320, after: 100 }, shading: fill('F4E4DC'), children: [text(`${format(day, 'EEEE')}  ·  ${format(day, 'd MMMM yyyy')}`, { bold: true, size: 25, color: '231E1C' })] }));
+      for (const r of reports) {
+        body.push(new Paragraph({ heading: HeadingLevel.HEADING_3, spacing: { before: 200, after: 80 }, keepNext: true, children: [text(`${r.employeeName}`, { bold: true, size: 23, color: hex(C.coral) }), text(`   ${r.roleTitle}  ·  ${r.reportCode}  ·  ${cap(r.status)}  ·  ${r.startTime}–${r.endTime}`, { size: 19, color: hex(C.muted) })] }));
+        if (r.objectives.length) { body.push(label('Objectives and achievements')); body.push(makeTable(['#', 'Objective', 'Status', 'Results / figures', 'Reason if not done'], r.objectives.map((o, k) => [String(k + 1), o.objective, o.status, o.resultsFigures || '—', o.reasonIfNotCompleted || '—']), [500, 3000, 1200, 2706, 2500], 2)); }
+        if (r.activities.length) { body.push(label('Activities')); body.push(makeTable(['Time', 'Activity / task', 'Quantity', 'Outcome', 'Place / person'], r.activities.map(a => [a.time, a.activityTask, a.quantityFigures || '—', a.outcome || '—', a.placePersonPlatform || '—']), [900, 3000, 1300, 2706, 2000]));}
+        if (r.challenges.length) { body.push(label('Challenges and actions')); body.push(makeTable(['When', 'Problem encountered', 'Status', 'Action taken'], r.challenges.map(c => [c.whenHappened, c.problemEncountered, c.resolved ? 'Resolved' : 'Outstanding', c.actionTaken || '—']), [1100, 3600, 1300, 3906], 2)); }
+        if (r.tomorrowPlans.length) { body.push(label('Planned for tomorrow')); body.push(makeTable(['#', 'Planned task', 'Approvals', 'Resources needed'], r.tomorrowPlans.map((t, k) => [String(k + 1), t.plannedTask, t.approvalsRequired || 'None', t.resourcesNeeded || '—']), [500, 4300, 2000, 3106])); }
+        for (const rv of r.reviews ?? []) body.push(p(`Review — ${rv.reviewerName}: ${cap(String(rv.decision))}${rv.rating ? ` (${rv.rating}/5)` : ''}${rv.comments ? ` — ${rv.comments}` : ''}`, { italics: true, size: 19, color: hex(C.muted) }));
+      }
+    }
+    void gi;
+  });
+
+  const doc = new Document({
+    creator: 'Plants & Pure', title: `${org} — Staff Reports`,
+    styles: { default: { document: { run: { font: 'Calibri', size: 21 }, paragraph: { spacing: { after: 80, line: 276 } } } } },
+    sections: [{
+      properties: { page: { size: { width: 11906, height: 16838 }, margin: { top: 1000, bottom: 1000, left: 1000, right: 1000 } } },
+      footers: { default: new Footer({ children: [new Paragraph({ alignment: AlignmentType.CENTER, children: [new TextRun({ text: `${org} · Confidential · Page `, size: 17, color: hex(C.muted) }), new TextRun({ children: [PageNumber.CURRENT], size: 17, color: hex(C.muted) })] })] }) },
+      children: body,
+    }],
+  });
+  return Packer.toBlob(doc);
+}
+
+export async function exportReportsToWord(daily: DailyReport[], weekly: WeeklyReport[], settings?: OrganisationSettings, filename = 'Plants-and-Pure-Reports.docx') {
+  await deliverFile(await makeCombinedWord(daily, weekly, settings), filename);
+}

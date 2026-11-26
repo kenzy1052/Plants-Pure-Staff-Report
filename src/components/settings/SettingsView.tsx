@@ -73,7 +73,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
 
   // Reporting Settings Form
   const [dailyDeadlineTime, setDailyDeadlineTime] = useState(settings.dailyDeadlineTime || '17:30');
-  const [reportingStartDate, setReportingStartDateState] = useState(settings.reportingStartDate || '2026-10-26');
+  const [reportingStartDate, setReportingStartDateState] = useState(settings.reportingStartDate || '2026-11-02');
   const [weeklyDeadlineTime, setWeeklyDeadlineTime] = useState(settings.weeklyDeadlineTime || '18:00');
   const [requireObjectives, setRequireObjectives] = useState(settings.requireObjectivesBeforeSubmit ?? true);
   const [allowWeekend, setAllowWeekend] = useState(settings.allowWeekendSubmissions ?? false);

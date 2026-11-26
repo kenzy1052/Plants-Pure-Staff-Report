@@ -191,6 +191,27 @@ html.dark[data-high-contrast="true"] { --border: oklch(0.55 0.02 55); --muted-fo
 .reduce-motion *, .reduce-motion *::before, .reduce-motion *::after { animation-duration: .01ms; transition-duration: .01ms; }
 @media print { @page { size: A4; margin: 16mm; } body { background: white; print-color-adjust: exact; } .no-print, aside, header { display: none; } .workspace-main { padding: 0; } .print-only { display: block; } section, article { break-inside: avoid; } }
 
+/* Auth experience */
+.auth-art-panel { background: linear-gradient(145deg, oklch(.92 .12 112), oklch(.79 .15 108) 48%, oklch(.65 .16 94)); }
+.auth-art-image { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; object-position: center; filter: saturate(1.08) contrast(1.02); animation: auth-art-float 12s ease-in-out infinite alternate; transform: scale(1.035); }
+.auth-form-pane { scrollbar-gutter: stable; }
+.auth-art-glow { position: absolute; z-index: 1; width: 22rem; height: 22rem; border-radius: 999px; background: oklch(.98 .08 95 / .42); filter: blur(42px); pointer-events: none; }
+.auth-art-glow-one { top: -8rem; left: -7rem; animation: auth-glow-one 10s ease-in-out infinite alternate; }
+.auth-art-glow-two { right: -8rem; bottom: -8rem; background: oklch(.55 .16 42 / .2); animation: auth-glow-two 13s ease-in-out infinite alternate; }
+.auth-section { padding: 1rem; border: 1px solid var(--border); border-radius: 1rem; background: color-mix(in oklab, var(--card) 82%, var(--brand-wash)); box-shadow: 0 10px 28px -24px oklch(.18 .02 95 / .35); }
+.auth-section-heading { display: flex; gap: .7rem; align-items: flex-start; margin-bottom: 1rem; }
+.auth-section-heading > span { display: grid; place-items: center; width: 1.65rem; height: 1.65rem; flex: 0 0 auto; border-radius: .55rem; background: var(--brand-soft); color: var(--accent-foreground); font-size: .68rem; font-weight: 800; }
+.auth-section-heading p:last-child { margin-top: .2rem; color: var(--muted-foreground); font-size: .72rem; }
+.auth-section label, .auth-shell > main label { display: block; margin-bottom: .45rem; font-size: .78rem; font-weight: 650; }
+.app-loader { display: grid; min-height: 100vh; place-items: center; background: var(--background); }
+.app-loader-mark { width: 4.8rem; height: 4.8rem; object-fit: contain; animation: app-loader-pulse 1.8s cubic-bezier(.4,0,.2,1) infinite; filter: drop-shadow(0 12px 22px oklch(.42 .1 112 / .22)); }
+@keyframes auth-art-float { from { transform: scale(1.035) translate3d(-.4%, -.35%, 0); } to { transform: scale(1.08) translate3d(.45%, .35%, 0); } }
+@keyframes auth-glow-one { from { transform: translate3d(0,0,0) scale(1); opacity: .7; } to { transform: translate3d(2rem, 1rem, 0) scale(1.1); opacity: .95; } }
+@keyframes auth-glow-two { from { transform: translate3d(0,0,0) scale(1); opacity: .5; } to { transform: translate3d(-1.5rem, -1rem, 0) scale(1.15); opacity: .8; } }
+@keyframes app-loader-pulse { 0%, 100% { opacity: .58; transform: scale(.92) rotate(-4deg); } 50% { opacity: 1; transform: scale(1.04) rotate(3deg); } }
+@media (prefers-reduced-motion: reduce) { .auth-art-image, .auth-art-glow, .app-loader-mark { animation: none; } }
+@media (min-width: 1024px) { .auth-form-pane > div { min-height: min-content; } }
+
 /* Plants and Pure visual refresh: light glassmorphism system */
 :root {
   --background: oklch(0.965 0.006 95);
@@ -362,3 +383,10 @@ html.dark .dashboard-panel, html.dark .dashboard-stat, html.dark .surface-card, 
 @media (max-width: 720px) { .report-submit-actions { align-items: stretch; flex-direction: column; } .report-submit-actions > div:last-child { justify-content: stretch; } .report-submit-actions > div:last-child > button { flex: 1 1 12rem; } }
 @media (min-width: 1200px) { .daily-report-page > [id^="report-step-"] { padding-inline: clamp(1.25rem, 2.5vw, 3rem); } }
 html[data-font-size="xlarge"] .daily-report-page, html[data-font-size="xxlarge"] .daily-report-page, html[data-font-size="huge"] .daily-report-page { max-width: none; }
+
+/* Chat-first daily report: comfortable on phones. 16px prevents iOS zoom-on-focus; the on-screen keyboard resizes the page (interactive-widget) so the composer stays visible. */
+@media (max-width: 640px) {
+  .daily-report-page input:not([type="checkbox"]):not([type="file"]), .daily-report-page select, .daily-report-page textarea, .daily-report-chat textarea { font-size: 16px; }
+  .daily-report-page .report-submit-actions { position: sticky; bottom: 0; z-index: 30; padding-bottom: max(0.75rem, env(safe-area-inset-bottom)); }
+  .daily-report-page .report-section-index { position: static; }
+}

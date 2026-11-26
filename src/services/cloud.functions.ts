@@ -2,8 +2,341 @@ import { createServerFn } from '@tanstack/react-start';
 import { requireSupabaseAuth } from '@/integrations/supabase/auth-middleware';
 import { z } from 'zod';
 import type { Json } from '@/integrations/supabase/types';
+import type { StructuredNarrationDraft } from '@/types';
+import { MAX_NARRATION_LENGTH, normalizeActivityTime } from '@/services/narrationParser';
+import { AllProvidersFailedError, ProviderError, callWithFallback, callWithFallbackDetailed, isRecoverableStatus, providerOrderFrom, type ProviderName } from '@/services/providerFallback';
+
+// Re-exported so existing imports/tests keep working.
+export { AllProvidersFailedError, ProviderError, callWithFallback, isRecoverableStatus };
+
 
 const storeSchema = z.enum(['daily_reports','weekly_reports','employees','roles','settings','notifications','audit_logs','evidence_attachments']);
+const reportItemShape = {
+  objectives: z.array(z.object({ id: z.string().catch(''), objective: z.string().catch(''), status: z.enum(['Done', 'Partly Done', 'Not Done']).catch('Not Done'), resultsFigures: z.string().catch(''), reasonIfNotCompleted: z.string().catch('') })).max(30),
+  activities: z.array(z.object({ id: z.string().catch(''), task: z.string().catch(''), outcome: z.string().catch(''), placePersonPlatform: z.string().catch(''), quantityFigures: z.string().catch(''), time: z.string().catch('') })).max(40),
+  challenges: z.array(z.object({ id: z.string().catch(''), problem: z.string().catch(''), whenHappened: z.string().catch(''), actionTaken: z.string().catch(''), resolved: z.boolean().catch(false) })).max(30),
+  tomorrowPlans: z.array(z.object({ id: z.string().catch(''), task: z.string().catch(''), resourcesNeeded: z.string().catch(''), approvalsRequired: z.string().catch('') })).max(30),
+};
+const narrationInputSchema = z.object({
+  narration: z.string().trim().min(1).max(MAX_NARRATION_LENGTH),
+  department: z.string().trim().max(160),
+  knownActivities: z.array(z.string().trim().min(1).max(240)).max(30).default([]),
+  currentReport: z.object(reportItemShape).partial().optional(),
+});
+const narrationOutputSchema = z.object({
+  ...reportItemShape,
+  pendingTasks: z.array(z.string()).max(30).catch([]),
+  achievements: z.array(z.string()).max(30).catch([]),
+  removeIds: z.array(z.string()).max(60).catch([]),
+  clarification: z.string().catch(''),
+  cleanedNarration: z.string().catch(''),
+}).partial({ objectives: true, activities: true, challenges: true, tomorrowPlans: true });
+const transcriptionInputSchema = z.object({
+  audioBase64: z.string().min(1).max(15_000_000),
+  // Browsers report e.g. "audio/webm;codecs=opus"; strip parameters before validating.
+  mimeType: z.string().default('audio/webm').transform((value) => normalizeAudioMime(value)).pipe(z.enum(['audio/webm', 'audio/ogg', 'audio/wav', 'audio/mp4', 'audio/mpeg'])),
+});
+
+export function normalizeAudioMime(value: string): string {
+  const base = (value.split(';')[0] ?? '').trim().toLowerCase();
+  if (base === 'audio/x-wav' || base === 'audio/wave') return 'audio/wav';
+  if (base === 'audio/x-m4a' || base === 'audio/m4a' || base === 'audio/aac') return 'audio/mp4';
+  if (base === 'audio/mp3') return 'audio/mpeg';
+  if (base === 'video/webm') return 'audio/webm';
+  if (base === 'video/mp4') return 'audio/mp4';
+  return base || 'audio/webm';
+}
+
+type ProviderConfig = { name: ProviderName; apiKey: string; model: string; baseUrl?: string };
+
+function safeErrorMessage(payload: unknown, fallback: string): string {
+  if (payload && typeof payload === 'object' && 'error' in payload) {
+    const error = payload.error;
+    if (typeof error === 'string') return error.slice(0, 300);
+    if (error && typeof error === 'object' && 'message' in error && typeof error.message === 'string') return error.message.slice(0, 300);
+  }
+  return fallback;
+}
+
+function groqBaseUrl(): string {
+  return (process.env['GROQ_API_URL'] || 'https://api.groq.com/openai/v1').replace(/\/+$/, '');
+}
+
+function providerConfig(name: ProviderName, purpose: 'report' | 'transcription'): ProviderConfig {
+  if (name === 'gemini') {
+    const apiKey = process.env['GEMINI_API_KEY'];
+    if (!apiKey) throw new ProviderError('Gemini is not configured. Add GEMINI_API_KEY on the server.', 'gemini');
+    return {
+      name,
+      apiKey,
+      model: purpose === 'report' ? (process.env['REPORT_AI_MODEL'] || 'gemini-3.8-flash') : (process.env['GEMINI_TRANSCRIPTION_MODEL'] || 'gemini-3.5-transcribe'),
+    };
+  }
+  const apiKey = process.env['GROQ_API_KEY'];
+  if (!apiKey) throw new ProviderError('Groq is not configured. Add GROQ_API_KEY on the server.', 'groq');
+  return {
+    name,
+    apiKey,
+    baseUrl: groqBaseUrl(),
+    model: purpose === 'report' ? (process.env['GROQ_REPORT_MODEL'] || 'llama-3.3-70b-versatile') : (process.env['REPORT_TRANSCRIPTION_MODEL'] || 'whisper-large-v3-turbo'),
+  };
+}
+
+async function fetchWithTimeout(input: RequestInfo | URL, init: RequestInit, provider: ProviderName, timeoutMs = 30_000): Promise<Response> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(input, { ...init, signal: controller.signal });
+  } catch (error) {
+    if ((error instanceof DOMException || error instanceof Error) && error.name === 'AbortError') throw new ProviderError('The AI provider timed out.', provider, 408, true);
+    throw new ProviderError('The AI provider could not be reached.', provider, undefined, true);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function readProviderJson(response: Response, provider: ProviderName, purpose: string): Promise<unknown> {
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw new ProviderError(`${provider} ${purpose} failed: ${safeErrorMessage(payload, `HTTP ${response.status}`)}`, provider, response.status, isRecoverableStatus(response.status));
+  }
+  return payload;
+}
+
+const STATUS_VALUES = ['Done', 'Partly Done', 'Not Done'];
+function reportSchema(options: { strict: boolean }) {
+  const obj = (required: string[], properties: Record<string, unknown>) => ({ type: 'object', ...(options.strict ? { additionalProperties: false } : {}), required, properties });
+  const str = { type: 'string' };
+  return obj(
+    ['objectives', 'activities', 'challenges', 'tomorrowPlans', 'pendingTasks', 'achievements', 'removeIds', 'clarification', 'cleanedNarration'],
+    {
+      objectives: { type: 'array', items: obj(['id', 'objective', 'status', 'resultsFigures', 'reasonIfNotCompleted'], { id: str, objective: str, status: { type: 'string', enum: STATUS_VALUES }, resultsFigures: str, reasonIfNotCompleted: str }) },
+      activities: { type: 'array', items: obj(['id', 'task', 'outcome', 'placePersonPlatform', 'quantityFigures', 'time'], { id: str, task: str, outcome: str, placePersonPlatform: str, quantityFigures: str, time: str }) },
+      challenges: { type: 'array', items: obj(['id', 'problem', 'whenHappened', 'actionTaken', 'resolved'], { id: str, problem: str, whenHappened: str, actionTaken: str, resolved: { type: 'boolean' } }) },
+      tomorrowPlans: { type: 'array', items: obj(['id', 'task', 'resourcesNeeded', 'approvalsRequired'], { id: str, task: str, resourcesNeeded: str, approvalsRequired: str }) },
+      pendingTasks: { type: 'array', items: str },
+      achievements: { type: 'array', items: str },
+      removeIds: { type: 'array', items: str },
+      clarification: str,
+      cleanedNarration: str,
+    },
+  );
+}
+
+const narrationSystem = (department: string) => `You are the drafting engine behind a chat-based daily report for a company's staff. The employee describes their day; you turn ONLY what they said into changes to the existing daily report form.
+
+The report has four lists:
+- objectives: {objective, status "Done"|"Partly Done"|"Not Done", resultsFigures, reasonIfNotCompleted}
+- activities: {task, placePersonPlatform, quantityFigures, outcome, time}
+- challenges: {problem, whenHappened, actionTaken, resolved}
+- tomorrowPlans: {task, resourcesNeeded, approvalsRequired}
+
+HARD ACCURACY RULES
+1. Use only facts explicitly stated in the employee's message. Never invent activities, quantities, achievements, people, places, platforms, dates, times, reasons, challenges or actions taken.
+2. A field that was not stated must be an empty string (or false / empty array). Do not guess. Do not use placeholders.
+3. "time" is only for a clock time the employee literally gave. Output "HH:MM - HH:MM" (24-hour) for a range, "HH:MM - " for a single start time, otherwise "". Never output a default such as 08:00 - 09:00.
+4. Never mark something completed unless the message says so. Work that was not finished, is waiting, or was blocked is NOT an activity: record it as an objective with status "Not Done" (or "Partly Done" if the employee says some progress was made), with the stated reason in reasonIfNotCompleted ("" if no reason was stated), and list it in pendingTasks. Never assume a pending task was completed.
+5. Create an objective only when the employee names a goal, target or task they intended to complete today. Do not turn every completed activity into an objective. If an objective was clearly completed, status is "Done".
+6. A challenge needs an explicit problem. actionTaken only if the employee said what they did about it. Set resolved true only if they said it was resolved.
+7. tomorrowPlans only for things the employee says they will do on the next working day. A pending task is NOT automatically a plan for tomorrow.
+8. achievements: only results the employee presents as an accomplishment. Copy them faithfully.
+9. You may fix grammar, remove repetition and use simple, professional, concise wording, but preserve the employee's meaning and any figures exactly.
+
+UPDATING AN EXISTING DRAFT
+The current report rows are provided with ids. Return ONLY rows that should change or be added:
+- To change an existing row (for example a correction like "I actually completed three videos, not one"), return that row with its id and its full corrected content.
+- To add something new, return it with id "".
+- Do not repeat rows that need no change. Never return a row just to clear a field.
+- Put an id in removeIds only if the employee explicitly asks to remove or cancel that item.
+- If the message is ambiguous (for example it could refer to several existing rows), change nothing for that part and ask one short question in "clarification". Otherwise clarification is "".
+- cleanedNarration: the new message with grammar cleaned up only.
+
+The employee's department is ${department || 'not specified'}. Respond with a single JSON object that follows the provided schema exactly and nothing else.`;
+
+function userPrompt(narration: string, knownActivities: string[], currentReport: unknown): string {
+  return `Known activity wording from this employee's past reports is vocabulary context only and is NOT evidence they did these today: ${knownActivities.join('; ') || 'none'}\n\nCurrent report rows (JSON):\n${JSON.stringify(currentReport ?? {})}\n\nEmployee's new message:\n${narration}`;
+}
+
+type NarrationInput = z.infer<typeof narrationInputSchema>;
+
+async function callGeminiReport(input: NarrationInput) {
+  const config = providerConfig('gemini', 'report');
+  const response = await fetchWithTimeout(`https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(config.model)}:generateContent`, {
+    method: 'POST',
+    headers: { 'x-goog-api-key': config.apiKey, 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      systemInstruction: { parts: [{ text: narrationSystem(input.department) }] },
+      contents: [{ role: 'user', parts: [{ text: userPrompt(input.narration, input.knownActivities, input.currentReport) }] }],
+      generationConfig: { temperature: 0, responseMimeType: 'application/json', responseSchema: reportSchema({ strict: false }) },
+    }),
+  }, 'gemini');
+  const payload = await readProviderJson(response, 'gemini', 'report structuring') as { candidates?: { content?: { parts?: { text?: string }[] } }[] };
+  const content = payload.candidates?.[0]?.content?.parts?.map((part) => part.text || '').join('') || '';
+  if (!content) throw new ProviderError('Gemini returned no report draft.', 'gemini', undefined, false);
+  return parseReportOutput(content, 'gemini');
+}
+
+async function callGroqReport(input: NarrationInput) {
+  const config = providerConfig('groq', 'report');
+  const schemaText = JSON.stringify(reportSchema({ strict: false }));
+  const messages = [
+    { role: 'system', content: `${narrationSystem(input.department)}\n\nJSON schema to follow:\n${schemaText}` },
+    { role: 'user', content: userPrompt(input.narration, input.knownActivities, input.currentReport) },
+  ];
+  const formats: (Record<string, unknown> | undefined)[] = [
+    { type: 'json_schema', json_schema: { name: 'daily_report_changes', strict: true, schema: reportSchema({ strict: true }) } },
+    { type: 'json_object' },
+    undefined,
+  ];
+  let response: Response | undefined;
+  for (const format of formats) {
+    response = await fetchWithTimeout(`${config.baseUrl}/chat/completions`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${config.apiKey}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ model: config.model, temperature: 0, messages, ...(format ? { response_format: format } : {}) }),
+    }, 'groq');
+    // 400 usually means this model does not support that response_format; try a simpler one.
+    if (response.status !== 400) break;
+  }
+  if (!response) throw new ProviderError('Groq did not respond.', 'groq', undefined, true);
+  const payload = await readProviderJson(response, 'groq', 'report structuring') as { choices?: { message?: { content?: string } }[] };
+  const content = payload.choices?.[0]?.message?.content;
+  if (!content) throw new ProviderError('Groq returned no report draft.', 'groq', undefined, false);
+  return parseReportOutput(content, 'groq');
+}
+
+function parseReportOutput(content: string, provider: ProviderName) {
+  let raw: unknown;
+  try { raw = parseJsonObject(content); } catch { throw new ProviderError(`${provider} returned an invalid report draft.`, provider, undefined, false); }
+  const parsed = narrationOutputSchema.safeParse(raw);
+  if (!parsed.success) throw new ProviderError(`${provider} returned an incomplete report draft.`, provider, undefined, false);
+  return parsed.data;
+}
+
+const CLOCK_TIME = /\b\d{1,2}\s*(?::\d{2})?\s*(?:am|pm)\b|\b\d{1,2}:\d{2}\b|\bnoon\b|\bmidnight\b/i;
+
+/** Converts validated provider output into the shared draft, enforcing the anti-fabrication rules. */
+export function toDraft(output: z.infer<typeof narrationOutputSchema>, input: { narration: string; currentReport?: NarrationInput['currentReport'] }): StructuredNarrationDraft {
+  const known = new Set<string>();
+  for (const list of [input.currentReport?.objectives, input.currentReport?.activities, input.currentReport?.challenges, input.currentReport?.tomorrowPlans]) for (const row of list ?? []) known.add(row.id);
+  const idOf = (id: string) => (id && known.has(id) ? id : undefined);
+  const timeAllowed = CLOCK_TIME.test(input.narration);
+  const objectives = (output.objectives ?? []).map((o) => ({ id: idOf(o.id), objective: o.objective.trim(), status: o.status, resultsFigures: o.resultsFigures.trim(), reasonIfNotCompleted: o.status === 'Done' ? '' : o.reasonIfNotCompleted.trim() })).filter((o) => o.objective);
+  const activities = (output.activities ?? []).map((a) => ({ id: idOf(a.id), task: a.task.trim(), outcome: a.outcome.trim(), placePersonPlatform: a.placePersonPlatform.trim(), quantityFigures: a.quantityFigures.trim(), time: timeAllowed ? normalizeActivityTime(a.time) : '' })).filter((a) => a.task);
+  const challenges = (output.challenges ?? []).map((c) => ({ id: idOf(c.id), problem: c.problem.trim(), whenHappened: c.whenHappened.trim(), actionTaken: c.actionTaken.trim(), resolved: c.resolved })).filter((c) => c.problem);
+  const tomorrowPlans = (output.tomorrowPlans ?? []).map((p) => ({ id: idOf(p.id), task: p.task.trim(), resourcesNeeded: p.resourcesNeeded.trim(), approvalsRequired: p.approvalsRequired.trim() })).filter((p) => p.task);
+  return {
+    objectives, activities, challenges, tomorrowPlans,
+    pendingTasks: output.pendingTasks.map((t) => t.trim()).filter(Boolean),
+    achievements: output.achievements.map((t) => t.trim()).filter(Boolean),
+    removeIds: output.removeIds.filter((id) => known.has(id)),
+    clarification: output.clarification.trim(),
+    cleanedNarration: output.cleanedNarration.trim() || input.narration.trim(),
+  };
+}
+
+function isEmptyDraft(draft: StructuredNarrationDraft) {
+  return !draft.objectives.length && !draft.activities.length && !draft.challenges.length && !draft.tomorrowPlans.length && !draft.removeIds.length && !draft.clarification;
+}
+
+function parseJsonObject(content: string): unknown {
+  const unfenced = content.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '').trim();
+  try { return JSON.parse(unfenced); } catch {
+    const start = unfenced.indexOf('{'); const end = unfenced.lastIndexOf('}');
+    if (start < 0 || end <= start) throw new Error('The AI provider returned an invalid report draft.');
+    return JSON.parse(unfenced.slice(start, end + 1));
+  }
+}
+
+async function callGroqTranscription(audioBase64: string, mimeType: string) {
+  const config = providerConfig('groq', 'transcription');
+  const bytes = Buffer.from(audioBase64, 'base64');
+  if (!bytes.length) throw new Error('The recording was empty.');
+  const form = new FormData();
+  form.append('file', new Blob([bytes], { type: mimeType }), `daily-report.${mimeType.split('/')[1] || 'webm'}`);
+  form.append('model', config.model);
+  form.append('language', 'en');
+  form.append('temperature', '0');
+  const response = await fetchWithTimeout(`${config.baseUrl}/audio/transcriptions`, { method: 'POST', headers: { Authorization: `Bearer ${config.apiKey}` }, body: form }, 'groq', 60_000);
+  const payload = await readProviderJson(response, 'groq', 'transcription') as { text?: string };
+  if (!payload.text?.trim()) throw new ProviderError('Groq returned an empty transcript.', 'groq', undefined, false);
+  return payload.text.trim();
+}
+
+async function callGeminiTranscription(audioBase64: string, mimeType: string) {
+  const config = providerConfig('gemini', 'transcription');
+  const response = await fetchWithTimeout(`https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(config.model)}:generateContent`, {
+    method: 'POST',
+    headers: { 'x-goog-api-key': config.apiKey, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ contents: [{ role: 'user', parts: [{ text: 'Transcribe this audio exactly. Return only the spoken words with punctuation. Do not summarize or invent missing words.' }, { inlineData: { mimeType, data: audioBase64 } }] }] }),
+  }, 'gemini', 60_000);
+  const payload = await readProviderJson(response, 'gemini', 'transcription') as { candidates?: { content?: { parts?: { text?: string }[] } }[] };
+  const text = payload.candidates?.[0]?.content?.parts?.map((part) => part.text || '').join('').trim();
+  if (!text) throw new ProviderError('Gemini returned an empty transcript.', 'gemini', undefined, false);
+  return text;
+}
+
+export function providerOrder(purpose: 'report' | 'transcription'): [ProviderName, ProviderName] {
+  return providerOrderFrom(purpose, purpose === 'report' ? process.env['REPORT_AI_PROVIDER'] : process.env['REPORT_TRANSCRIPTION_PROVIDER']);
+}
+
+export const structureNarration = createServerFn({ method: 'POST' }).middleware([requireSupabaseAuth]).inputValidator((input: unknown) => narrationInputSchema.parse(input)).handler(async ({ data }) => {
+  const [primary, fallback] = providerOrder('report');
+  const outcome = await callWithFallbackDetailed('report', primary, fallback, async (provider) => {
+    const output = provider === 'gemini' ? await callGeminiReport(data) : await callGroqReport(data);
+    const draft = toDraft(output, data);
+    // A provider that returns nothing usable for a real narration counts as a failed attempt.
+    if (isEmptyDraft(draft) && data.narration.trim().length >= 15) throw new ProviderError(`${provider} returned no usable report content.`, provider, undefined, false);
+    return draft;
+  });
+  return { draft: outcome.value, provider: outcome.provider, fellBack: outcome.fellBack, primaryFailure: outcome.primaryFailure ?? '' };
+});
+
+export const transcribeAudio = createServerFn({ method: 'POST' }).middleware([requireSupabaseAuth]).inputValidator((input: unknown) => transcriptionInputSchema.parse(input)).handler(async ({ data }) => {
+  const [primary, fallback] = providerOrder('transcription');
+  const outcome = await callWithFallbackDetailed('transcription', primary, fallback, (provider) => provider === 'groq' ? callGroqTranscription(data.audioBase64, data.mimeType) : callGeminiTranscription(data.audioBase64, data.mimeType));
+  return { text: outcome.value, provider: outcome.provider, fellBack: outcome.fellBack };
+});
+
+// ---------------------------------------------------------------------------
+// Fixed daily-report recipient (Madam Ursula)
+// ---------------------------------------------------------------------------
+export interface ReportRecipient { id: string; name: string }
+let recipientCache: { value: ReportRecipient; at: number } | null = null;
+const escapeLike = (value: string) => value.replace(/[\\%_]/g, (c) => `\\${c}`);
+
+/**
+ * Resolves Madam Ursula's real staff profile. Order: REPORT_RECIPIENT_USER_ID (exact
+ * profile id) -> active profile whose name matches REPORT_RECIPIENT_NAME (default
+ * "Ursula"). Never guesses: zero or ambiguous matches throw a message that names
+ * exactly what to fix.
+ */
+export async function resolveReportRecipient(): Promise<ReportRecipient> {
+  if (recipientCache && Date.now() - recipientCache.at < 5 * 60_000) return recipientCache.value;
+  const { supabaseAdmin } = await import('@/integrations/supabase/client.server');
+  const pinnedId = process.env['REPORT_RECIPIENT_USER_ID']?.trim();
+  let found: ReportRecipient | null = null;
+  if (pinnedId) {
+    const { data, error } = await supabaseAdmin.from('profiles').select('id,name,email,active').eq('id', pinnedId).maybeSingle();
+    if (error) throw new Error(`Could not look up the report recipient: ${error.message}`);
+    if (!data || !data.active) throw new Error('REPORT_RECIPIENT_USER_ID does not match an active staff profile. Fix the id or remove the variable.');
+    found = { id: data.id, name: data.name || data.email };
+  } else {
+    const needle = (process.env['REPORT_RECIPIENT_NAME'] || 'Ursula').trim();
+    const { data, error } = await supabaseAdmin.from('profiles').select('id,name,email,active').eq('active', true).ilike('name', `%${escapeLike(needle)}%`);
+    if (error) throw new Error(`Could not look up the report recipient: ${error.message}`);
+    const rows = data ?? [];
+    if (rows.length === 0) throw new Error(`Madam Ursula's staff profile was not found (no active profile name contains "${needle}"). Create her staff account, or set REPORT_RECIPIENT_USER_ID on the server.`);
+    if (rows.length > 1) throw new Error(`More than one active profile matches "${needle}" (${rows.map((r) => r.name || r.email).join(', ')}). Set REPORT_RECIPIENT_USER_ID on the server to the correct profile id.`);
+    const row = rows[0]!;
+    found = { id: row.id, name: row.name || row.email };
+  }
+  recipientCache = { value: found, at: Date.now() };
+  return found;
+}
+
+export const getDailyReportRecipient = createServerFn({ method: 'POST' }).middleware([requireSupabaseAuth]).handler(async () => resolveReportRecipient());
+
 export const getCloudUser = createServerFn({ method: 'POST' }).middleware([requireSupabaseAuth]).handler(async ({ context }) => {
   const [{ data: profile, error }, { data: role }] = await Promise.all([
     context.supabase.from('profiles').select('*').eq('id', context.userId).single(),
@@ -21,7 +354,7 @@ export const getCloudUser = createServerFn({ method: 'POST' }).middleware([requi
 export const readCloudStore = createServerFn({ method: 'POST' }).middleware([requireSupabaseAuth]).inputValidator((input: unknown) => z.object({ store: storeSchema }).parse(input)).handler(async ({ data, context }) => {
   const rows: Json[] = [];
   for (let offset = 0; ; offset += 500) {
-    const { data: records, error } = await context.supabase.from('reporting_records').select('payload').eq('store', data.store).order('id').range(offset, offset+499);
+    const { data: records, error } = await context.supabase.from('reporting_records').select('payload').eq('store', data.store).order('id').range(offset,offset+499);
     if (error) throw new Error(error.message);
     rows.push(...(records ?? []).map(row => row.payload));
     if (!records || records.length < 500) break;
@@ -49,7 +382,7 @@ export const writeCloudRecord = createServerFn({ method:'POST' }).middleware([re
     const prior=old?.payload as Record<string,unknown> | undefined;
     ownerId=old?.owner_id ?? String(payload['employeeId'] ?? context.userId);
     if(ownerId!==context.userId) {
-      if(role!=='ceo' && !(role==='manager' && old?.supervisor_id===context.userId)) throw new Error('You cannot change this report.');
+      if(role!=='ceo' && role!=='manager') throw new Error('You cannot change this report.');
       if(!old || data.operation==='delete' || prior?.['status']!=='submitted') throw new Error('Only submitted reports can be reviewed.');
       if(!['approved','returned'].includes(String(payload['status']))) throw new Error('Invalid review decision.');
       const oldReviews=Array.isArray(prior['reviews'])?prior['reviews']:[];
@@ -66,6 +399,11 @@ export const writeCloudRecord = createServerFn({ method:'POST' }).middleware([re
     }
     const {data:ownerProfile}=await context.supabase.from('profiles').select('supervisor_id').eq('id',ownerId).maybeSingle();
     supervisorId=old?.supervisor_id ?? ownerProfile?.supervisor_id ?? null;
+    // Daily reports always go to the fixed recipient (Madam Ursula), whatever the client sent.
+    if(data.store==='daily_reports' && data.operation==='put' && ownerId===context.userId) {
+      const recipient=await resolveReportRecipient();
+      if(recipient.id!==ownerId) { payload['submittedToId']=recipient.id; payload['submittedToName']=recipient.name; supervisorId=recipient.id; }
+    }
   } else if(['employees','roles','settings'].includes(data.store)) {
     if(role!=='ceo') throw new Error('CEO access required.');
   } else if(data.store==='notifications') {

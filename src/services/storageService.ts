@@ -25,6 +25,7 @@ import {
 import { supabase } from '@/integrations/supabase/client';
 import { getCloudUser } from './cloud.functions';
 import { getSessionUser, setSessionUser, isDemoSession } from './session';
+import { getReportRecipient } from './reportRecipient';
 import { canReadReport, canReviewReport } from './access';
 
 export async function initializeDatabase(): Promise<void> {
@@ -167,6 +168,13 @@ export const DailyReportService = {
       reportCode = `PP-DR-${monthStr}-${String(count).padStart(3, '0')}`;
     }
 
+    // Daily reports always go to the fixed recipient (Madam Ursula). Callers cannot override it.
+    // If the employee is the recipient herself, fall back to her own supervisor.
+    const resolved = await getReportRecipient();
+    const recipient = resolved.id === actor.id
+      ? { id: actor.supervisorId || '', name: actor.supervisorName || '' }
+      : resolved;
+
     const draftReport: DailyReport = {
       id,
       reportCode,
@@ -178,8 +186,8 @@ export const DailyReportService = {
       date: report.date || now.slice(0,10),
       dayOfWeek: report.dayOfWeek || 'Monday',
       reportingPeriod: report.reportingPeriod || 'Current Week',
-      submittedToId: report.submittedToId || actor.supervisorId || '',
-      submittedToName: report.submittedToName || actor.supervisorName || '',
+      submittedToId: recipient.id,
+      submittedToName: recipient.name,
       startTime: report.startTime || '08:00',
       endTime: report.endTime || '17:00',
       status: 'draft',
@@ -206,6 +214,8 @@ export const DailyReportService = {
   async submitReport(id: string, actor: User): Promise<DailyReport> {
     const report = await this.getReportById(id);
     if (!report) throw new Error('Report not found');
+    // Idempotent: a repeated click or a network retry must not submit or notify twice.
+    if (report.status === 'submitted' || report.status === 'approved') return report;
 
     const now = new Date().toISOString();
     const wasReturned = report.status === 'returned';

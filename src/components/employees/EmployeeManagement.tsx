@@ -52,7 +52,7 @@ export const EmployeeManagement: React.FC<EmployeeManagementProps> = ({
   const [formPhone, setFormPhone] = useState('');
   const [formEmployeeId, setFormEmployeeId] = useState('');
   const [formRoleId, setFormRoleId] = useState('');
-  const [formSupervisorName, setFormSupervisorName] = useState('Sarah Jenkins');
+  const [formSupervisorName, setFormSupervisorName] = useState('Madam Ursula');
 
   // Deactivate confirmation modal state
   const [deactivateTarget, setDeactivateTarget] = useState<Employee | null>(null);
@@ -86,7 +86,7 @@ export const EmployeeManagement: React.FC<EmployeeManagementProps> = ({
     setFormPhone('+234 80');
     setFormEmployeeId(`PP-EMP-${Math.floor(110 + employees.length)}`);
     setFormRoleId(roles[0]?.id || 'role_agri');
-    setFormSupervisorName('Sarah Jenkins');
+    setFormSupervisorName('Madam Ursula');
     setShowAddEditModal(true);
   };
 
@@ -406,7 +406,7 @@ export const EmployeeManagement: React.FC<EmployeeManagementProps> = ({
                   onChange={(e) => setFormSupervisorName(e.target.value)}
                   className="w-full p-2 rounded-lg border border-border  bg-card  text-foreground  font-medium"
                 >
-                  <option value="Sarah Jenkins">Sarah Jenkins (Operations & Cultivation Manager)</option>
+                  <option value="Madam Ursula">Madam Ursula (Operations & Cultivation Manager)</option>
                   <option value="Dr. Tariq Al-Mansoor">Dr. Tariq Al-Mansoor (Chief Executive Officer)</option>
                 </select>
               </div>

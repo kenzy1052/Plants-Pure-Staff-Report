@@ -3,6 +3,7 @@ import { startOfISOWeek } from 'date-fns';
 import { reportingWeekNumber, setReportingStart } from '@/utils/reportingWeek';
 import { dbService } from '@/services/db';
 import { syncPushSubscription, pushSupported } from '@/lib/pushClient';
+import { startUpdateWatcher } from '@/lib/appUpdate';
 import { useNavigate, useRouterState } from '@tanstack/react-router';
 import { Sidebar } from './layout/Sidebar';
 import { Header } from './layout/Header';
@@ -24,6 +25,7 @@ import { getCloudUser } from '@/services/cloud.functions';
 import { supabase } from '@/integrations/supabase/client';
 import { DisplaySettingsService, watchSystemTheme } from '@/services/displaySettings';
 import { ConfirmHost } from './common/ConfirmDialog';
+import logo from '@/assets/logo.png';
 import type { User, DailyReport, WeeklyReport, Employee, RoleDesignation, OrganisationSettings, Notification, AuditLog } from '@/types';
 import { Button } from './ui/button';
 import { toast } from 'sonner';
@@ -39,7 +41,7 @@ export default function Workspace() {
  const seenNotifs=useRef<Set<string>|null>(null);const remindedRef=useRef<Set<string>>(new Set());
  const announceNew=(list:Notification[])=>{const seen=seenNotifs.current;if(seen){for(const x of list){if(!x.read&&!seen.has(x.id)){toast(x.title,{description:x.message});try{if('Notification' in window&&Notification.permission==='granted'&&document.hidden){void navigator.serviceWorker?.getRegistration().then(r=>r?.showNotification(x.title,{body:x.message,icon:'/icons/icon-192.png',badge:'/icons/badge-96.png',tag:x.id}));}}catch{/* ignore */}}}}seenNotifs.current=new Set(list.map(x=>x.id));};
  const refresh=useCallback(async()=> { if(!user)return;try{await initializeDatabase();const [d,w,e,r,s,n,a]=await Promise.all([DailyReportService.getAllDailyReports(),WeeklyReportService.getAllWeeklyReports(),EmployeeService.getAllEmployees(),RoleService.getAllRoles(),SettingsService.getSettings(),NotificationService.getNotifications(user.id),AuditService.getAllAuditLogs()]);setDaily(d);setWeekly(w);setEmployees(e);setRoles(r);setSettings(s);announceNew(n);setNotifications(n);setAudit(a);setError('');}catch(e){const message=e instanceof Error?e.message:'Reports could not be loaded.';setError(message);toast.error('Workspace could not refresh',{description:message});}},[user]);
- useEffect(()=>{ if('serviceWorker' in navigator && location.protocol!=='http:' || location.hostname==='localhost') void navigator.serviceWorker?.register('/sw.js').catch(()=>{}); },[]);
+ useEffect(()=>{ if('serviceWorker' in navigator && (window.location.protocol!=='http:' || window.location.hostname==='localhost')) void navigator.serviceWorker?.register('/sw.js').catch(()=>{}); },[]);
  useEffect(()=> { DisplaySettingsService.applySettings(DisplaySettingsService.getSettings());watchSystemTheme();setCollapsed(localStorage.getItem('pp_sidebar_collapsed')==='1'); let active=true;void (async()=> {const {data}=await supabase.auth.getSession();let u:User|null=null;try{u=data.session?await getCloudUser():null;setSessionUser(u,!data.session);}catch(e){setError(e instanceof Error?e.message:'Sign-in failed.');}if(active){setUser(u);setReady(true);}})();return()=>{active=false};},[]);
  useEffect(()=>{void refresh()},[refresh]);
  // Live updates: new submissions, approvals and returns appear instantly; polling is the safety net.
@@ -51,6 +53,7 @@ export default function Workspace() {
  // Phone alerts (work even when the app is closed): keep this device registered, and ask again after a week if skipped.
  useEffect(()=>{ if(!user||isDemoSession()||!pushSupported())return; if(Notification.permission==='granted'){void syncPushSubscription(false);return;} if(Notification.permission!=='default')return; const asked=Number(localStorage.getItem('pp_notif_asked')||0); if(asked&&Date.now()-asked<7*864e5)return; const t=window.setTimeout(()=>{localStorage.setItem('pp_notif_asked',String(Date.now()));toast('Get report alerts on your phone',{description:'Know straight away when a report is submitted, approved or returned — even when the app is closed.',duration:20000,action:{label:'Turn on',onClick:()=>{void syncPushSubscription(true).then(ok=>ok?toast.success('Alerts are on for this device'):toast.error('Alerts were not turned on',{description:'Allow notifications for this site in your browser settings.'}));}}});},4000); return()=>window.clearTimeout(t); },[user]);
  useEffect(()=>{ setReportingStart(settings?.reportingStartDate); },[settings]);
+ useEffect(()=>startUpdateWatcher(),[]);
  // Deadline reminders: from one hour before the daily / weekly deadline, if nothing has been submitted.
  useEffect(()=>{ if(!user||!settings||isDemoSession()||!seenNotifs.current)return; const now=new Date();const pad=(x:number)=>String(x).padStart(2,'0');const today=`${now.getFullYear()}-${pad(now.getMonth()+1)}-${pad(now.getDate())}`;
   const dayName=now.toLocaleDateString('en-GB',{weekday:'long'});const mins=(t:string)=>{const [h,m]=t.split(':').map(Number);return (h||0)*60+(m||0);};const nowMin=now.getHours()*60+now.getMinutes();
@@ -62,7 +65,7 @@ export default function Workspace() {
   const wk=reportingWeekNumber(now),wy=startOfISOWeek(now).getFullYear();const weeklyId=`rem_weekly_${wy}-W${pad(wk)}_${user.id}`;
   if(dayName===settings.weeklyDeadlineDay&&nowMin>=mins(settings.weeklyDeadlineTime)-60&&!exists(weeklyId)&&!weekly.some(r=>r.employeeId===user.id&&r.weekNumber===wk&&r.year===wy&&(r.status==='submitted'||r.status==='approved')))void send(weeklyId,'Weekly report due',`Your weekly report is due by ${settings.weeklyDeadlineTime} today.`,'weekly'); },[user,settings,daily,weekly,notifications,refresh]);
  const switchUser=(u:User)=> {AuthService.setCurrentUser(u);setUser(u);go('dashboard')};
- if(!ready)return <div className="min-h-screen flex items-center justify-center text-muted-foreground">Loading Plants & Pure…</div>;
+ if(!ready)return <div className="app-loader" role="status" aria-label="Loading"><img src={logo} alt="" className="app-loader-mark" /><span className="sr-only">Loading</span></div>;
  if(!user||activeView==='auth')return <LoginPage onLoginSuccess={u=>{setUser(u);go('dashboard')}}/>;
  const dailyReport=daily.find(r=>r.id===param);const weeklyReport=weekly.find(r=>r.id===param);
  const title:Record<string,string>={dashboard:'Reporting overview',daily_reports:'Daily reports',daily_report_new:'New daily report',daily_report_edit:'Edit daily report',daily_report_detail:'Daily report',weekly_reports:'Weekly reports',weekly_report_detail:'Weekly report',approvals:'Approvals & reviews',records:'Report records',employees:'Staff directory',analytics:'Performance',settings:'Settings & data'};
@@ -73,7 +76,7 @@ export default function Workspace() {
  {error&&<div role="alert" className="flex flex-wrap items-center justify-between gap-3 border border-destructive/30 bg-destructive-soft text-destructive px-4 py-3 rounded-lg mb-6 text-sm">{error}<Button variant="ghost" onClick={()=>void refresh()}>Try again</Button></div>}
  {activeView==='dashboard'&&<ReportingDashboard currentUser={user} dailyReports={daily} weeklyReports={weekly} employees={employees} onNavigate={go}/>}
  {activeView==='daily_reports'&&<DailyReportsList reports={daily} currentUser={user} onNavigate={go}/>}
- {(activeView==='daily_report_new'||activeView==='daily_report_edit')&&<DailyReportForm key={param??'new'} currentUser={user} existingReport={activeView==='daily_report_edit'?dailyReport:undefined} initialDate={param} onNavigate={go} onSaved={()=>void refresh()}/>}
+ {(activeView==='daily_report_new'||activeView==='daily_report_edit')&&<DailyReportForm key={param??'new'} currentUser={user} existingReport={activeView==='daily_report_edit'?dailyReport:undefined} initialDate={param} dailyReports={daily} onNavigate={go} onSaved={()=>void refresh()}/>} 
  {activeView==='daily_report_detail'&&(dailyReport?<DailyReportDetail key={dailyReport.id} report={dailyReport} currentUser={user} onNavigate={go} onReportUpdated={()=>void refresh()}/>:<p className="empty-state">Report not found.</p>)}
  {activeView==='weekly_reports'&&<WeeklyReportsList reports={weekly} dailyReports={daily} employees={employees} currentUser={user} onNavigate={go} onRefreshData={()=>void refresh()}/>}
  {activeView==='weekly_report_detail'&&(weeklyReport?<WeeklyReportDetail key={weeklyReport.id} report={weeklyReport} dailyReports={daily.filter(r=>r.employeeId===weeklyReport.employeeId && r.date>=weeklyReport.startDate && r.date<=weeklyReport.endDate)} currentUser={user} onNavigate={go} onReportUpdated={()=>void refresh()}/>:<p className="empty-state">Report not found.</p>)}

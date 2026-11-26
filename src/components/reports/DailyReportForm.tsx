@@ -1,8 +1,15 @@
 import { reportingWeekNumber } from '@/utils/reportingWeek';
+import { startOfISOWeek, format as formatDate } from 'date-fns';
 import { toast } from 'sonner';
 import { readLocalDraft, writeLocalDraft, clearLocalDraft } from '@/lib/localDraft';
 import { Button } from "@/components/ui/button";
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
+import { DailyReportChat } from './DailyReportChat';
+import { VoiceInput } from './VoiceField';
+import { dismissSuggestion, getActivitySuggestions, readDismissedSuggestions } from '@/services/activitySuggestions';
+import type { NarrationResult, StructuredNarrationDraft } from '@/services/narrationAssistant';
+import { mergeNarrationDraft, type MergeSummary, type ReportState } from '@/services/narrationParser';
+import { getReportRecipient, type ReportRecipient } from '@/services/reportRecipient';
 import { 
   ArrowLeft, 
   Save, 
@@ -16,7 +23,8 @@ import {
   Clock, 
   Paperclip, 
   X,
-  FileCheck
+  FileCheck,
+  Lock
 } from 'lucide-react';
 import { 
   User, 
@@ -34,6 +42,7 @@ interface DailyReportFormProps {
   currentUser: User;
   existingReport?: DailyReport | null | undefined;
   initialDate?: string | undefined;
+  dailyReports?: DailyReport[];
   onNavigate: (view: string, param?: string) => void;
   onSaved: () => void;
 }
@@ -44,6 +53,7 @@ export const DailyReportForm: React.FC<DailyReportFormProps> = ({
   currentUser,
   existingReport,
   initialDate,
+  dailyReports = [],
   onNavigate,
   onSaved
 }) => {
@@ -57,9 +67,17 @@ export const DailyReportForm: React.FC<DailyReportFormProps> = ({
   const [step, setStep] = useState(0);
   const [startTime, setStartTime] = useState<string>(existingReport?.startTime || '08:00');
   const [endTime, setEndTime] = useState<string>(existingReport?.endTime || '17:00');
-  const [submittedToName, setSubmittedToName] = useState<string>(
-    existingReport?.submittedToName || currentUser.supervisorName || ''
-  );
+  // The recipient is fixed (Madam Ursula) and resolved from the staff directory; employees cannot change it.
+  const [recipient, setRecipient] = useState<ReportRecipient | null>(null);
+  const [recipientError, setRecipientError] = useState('');
+  const submittedToName = recipient?.name ?? '';
+  useEffect(() => {
+    let active = true;
+    getReportRecipient().then((value) => { if (active) { setRecipient(value); setRecipientError(''); } }).catch((error: unknown) => {
+      if (active) setRecipientError(error instanceof Error ? error.message : 'The report recipient could not be loaded.');
+    });
+    return () => { active = false; };
+  }, []);
 
   // Section 2: Objectives
   const [objectives, setObjectives] = useState<DailyObjective[]>(
@@ -72,7 +90,7 @@ export const DailyReportForm: React.FC<DailyReportFormProps> = ({
   const [activities, setActivities] = useState<DailyActivity[]>(
     existingReport?.activities?.length 
       ? existingReport.activities 
-      : [{ id: `act_${Date.now()}_1`, time: '08:30 - 10:30', activityTask: '', placePersonPlatform: '', quantityFigures: '', outcome: '' }]
+      : [{ id: `act_${Date.now()}_1`, time: '', activityTask: '', placePersonPlatform: '', quantityFigures: '', outcome: '' }]
   );
 
   // Section 4: Challenges
@@ -91,6 +109,16 @@ export const DailyReportForm: React.FC<DailyReportFormProps> = ({
   const [attachments, setAttachments] = useState<EvidenceAttachment[]>(
     existingReport?.attachments || []
   );
+  // Chat-first: a new report starts with the conversation; the form below is the review/edit surface.
+  const [chatApplied, setChatApplied] = useState(false);
+  const [manualMode, setManualMode] = useState(false);
+  const [canUndo, setCanUndo] = useState(false);
+  const undoRef = useRef<ReportState | null>(null);
+  const reportRef = useRef<ReportState>({ objectives, activities, challenges, tomorrowPlans });
+  reportRef.current = { objectives, activities, challenges, tomorrowPlans };
+  const submitLockRef = useRef(false);
+  const savedRef = useRef<{ id: string; reportCode: string } | null>(existingReport ? { id: existingReport.id, reportCode: existingReport.reportCode } : null);
+  const [dismissedSuggestions, setDismissedSuggestions] = useState<string[]>(() => readDismissedSuggestions(currentUser.id));
 
   const [validationError, setValidationError] = useState<string | null>(null);
   const [isSaving, setIsSaving] = useState(false);
@@ -113,12 +141,12 @@ export const DailyReportForm: React.FC<DailyReportFormProps> = ({
       setStep(d.step ?? 0);
       if (d.startTime) setStartTime(d.startTime);
       if (d.endTime) setEndTime(d.endTime);
-      if (d.submittedToName !== undefined) setSubmittedToName(d.submittedToName);
       if (d.objectives?.length) setObjectives(d.objectives);
       if (d.activities?.length) setActivities(d.activities);
       if (d.challenges) setChallenges(d.challenges);
       if (d.tomorrowPlans?.length) setTomorrowPlans(d.tomorrowPlans);
       if (d.attachments) setAttachments(d.attachments);
+      setManualMode(true);
       toast.info('Your unsaved report was restored', { description: 'You can continue exactly where you stopped.' });
     }
     setHydrated(true);
@@ -129,22 +157,27 @@ export const DailyReportForm: React.FC<DailyReportFormProps> = ({
     const hasContent = objectives.some(o => o.objective.trim() || o.resultsFigures.trim()) || activities.some(a => a.activityTask.trim() || a.outcome.trim()) || challenges.length > 0 || tomorrowPlans.some(p => p.plannedTask.trim()) || attachments.length > 0;
     if (!existingReport && !hasContent) return;
     const t = setTimeout(() => {
-      if (writeLocalDraft(draftKey, { date, step, startTime, endTime, submittedToName, objectives, activities, challenges, tomorrowPlans, attachments })) setLastLocalSave(new Date().toISOString());
+      if (writeLocalDraft(draftKey, { date, step, startTime, endTime, objectives, activities, challenges, tomorrowPlans, attachments })) setLastLocalSave(new Date().toISOString());
     }, 600);
     return () => clearTimeout(t);
-  }, [hydrated, date, step, startTime, endTime, submittedToName, objectives, activities, challenges, tomorrowPlans, attachments]);
+  }, [hydrated, date, step, startTime, endTime, objectives, activities, challenges, tomorrowPlans, attachments]);
   // Determine day of week & ISO week
   const dateObj = new Date(date + 'T00:00:00');
   const dayOfWeekName = dateObj.toLocaleDateString('en-GB', { weekday: 'long' });
   const isWeekend = dateObj.getDay() === 0 || dateObj.getDay() === 6;
+  // Back-dating is allowed for earlier days of the CURRENT reporting week only; future dates are never allowed.
+  const todayStr = formatDate(new Date(), 'yyyy-MM-dd');
+  const weekStartStr = formatDate(startOfISOWeek(new Date()), 'yyyy-MM-dd');
+  const minDate = existingReport && existingReport.date < weekStartStr ? existingReport.date : weekStartStr;
 
   // Calculate week number
   const getWeekNumber = (d: Date) => reportingWeekNumber(d);
   const weekNum = getWeekNumber(dateObj);
   const reportingPeriod = `Week ${weekNum}, ${dateObj.getFullYear()}`;
+  const activitySuggestions = getActivitySuggestions(dailyReports, currentUser.id, { dismissed: dismissedSuggestions, excludeReportId: existingReport?.id });
 
   const sectionProgress = [
-    ['Employee', [date, startTime, endTime, submittedToName].map(Boolean)],
+    ['Employee', [Boolean(date), Boolean(startTime), Boolean(endTime), Boolean(recipient)]],
     ['Objectives', objectives.length ? objectives.map(objective => Boolean(objective.objective.trim()) && Boolean(objective.resultsFigures.trim()) && (objective.status === 'Done' || Boolean(objective.reasonIfNotCompleted?.trim()))) : [false]],
     ['Activities', activities.length ? activities.map(activity => Boolean(activity.activityTask.trim()) && Boolean(activity.placePersonPlatform.trim()) && Boolean(activity.quantityFigures.trim()) && Boolean(activity.outcome.trim())) : [false]],
     ['Challenges', challenges.length ? challenges.map(challenge => Boolean(challenge.problemEncountered.trim()) && Boolean(challenge.actionTaken.trim())) : [true]],
@@ -177,7 +210,7 @@ export const DailyReportForm: React.FC<DailyReportFormProps> = ({
   const addActivity = () => {
     setActivities([
       ...activities,
-      { id: `act_${Date.now()}_${Math.random().toString(36).substring(2, 5)}`, time: '11:00 - 13:00', activityTask: '', placePersonPlatform: '', quantityFigures: '', outcome: '' }
+      { id: `act_${Date.now()}_${Math.random().toString(36).substring(2, 5)}`, time: '', activityTask: '', placePersonPlatform: '', quantityFigures: '', outcome: '' }
     ]);
   };
 
@@ -191,11 +224,54 @@ export const DailyReportForm: React.FC<DailyReportFormProps> = ({
     setActivities(activities.map(a => a.id === id ? { ...a, [field]: value } : a));
   };
 
+  const useActivitySuggestion = (value: string) => {
+    const normalized = value.trim().toLocaleLowerCase();
+    if (activities.some((activity) => activity.activityTask.trim().toLocaleLowerCase() === normalized)) {
+      toast.info('Already added', { description: 'That activity is already in this report.' });
+      return;
+    }
+    setActivities((current) => {
+      const blankIndex = current.findIndex((activity) => !activity.activityTask.trim());
+      if (blankIndex >= 0) return current.map((activity, index) => index === blankIndex ? { ...activity, activityTask: value } : activity);
+      return [...current, { id: `act_${Date.now()}_${Math.random().toString(36).substring(2, 5)}`, time: '', activityTask: value, placePersonPlatform: '', quantityFigures: '', outcome: '' }];
+    });
+  };
+
+  const applyChatDraft = (draft: StructuredNarrationDraft, _result: NarrationResult): MergeSummary => {
+    const before = reportRef.current;
+    const { next, summary } = mergeNarrationDraft(before, draft);
+    if (summary.added + summary.updated + summary.removed > 0) {
+      undoRef.current = before;
+      setCanUndo(true);
+      setObjectives(next.objectives);
+      setActivities(next.activities);
+      setChallenges(next.challenges);
+      setTomorrowPlans(next.tomorrowPlans);
+    }
+    setChatApplied(true);
+    return summary;
+  };
+
+  const undoChatChange = () => {
+    const previous = undoRef.current;
+    if (!previous) return;
+    setObjectives(previous.objectives);
+    setActivities(previous.activities);
+    setChallenges(previous.challenges);
+    setTomorrowPlans(previous.tomorrowPlans);
+    undoRef.current = null;
+    setCanUndo(false);
+    toast.info('Last chat change undone');
+  };
+
+  const scrollToReview = () => document.getElementById('report-review')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  const showForm = isEditing || chatApplied || manualMode;
+
   // Challenges handlers
   const addChallenge = () => {
     setChallenges([
       ...challenges,
-      { id: `ch_${Date.now()}_${Math.random().toString(36).substring(2, 5)}`, problemEncountered: '', whenHappened: 'Afternoon', actionTaken: '', resolved: false }
+      { id: `ch_${Date.now()}_${Math.random().toString(36).substring(2, 5)}`, problemEncountered: '', whenHappened: '', actionTaken: '', resolved: false }
     ]);
   };
 
@@ -262,6 +338,15 @@ export const DailyReportForm: React.FC<DailyReportFormProps> = ({
   const validate = (): boolean => {
     setValidationError(null);
 
+    if (date > todayStr) {
+      toast.error('Date not allowed', { description: 'A report cannot be dated in the future.' });
+      return false;
+    }
+    if (date < minDate) {
+      toast.error('Date not allowed', { description: `You can only back-date reports within the current reporting week (Week ${reportingWeekNumber(new Date())}).` });
+      return false;
+    }
+
     if (isWeekend) {
       toast.error('Choose a weekday', { description: 'Ordinary daily reports are accepted Monday through Friday.' });
       return false;
@@ -308,7 +393,7 @@ export const DailyReportForm: React.FC<DailyReportFormProps> = ({
     setValidationError(null);
     try {
       const payload: Partial<DailyReport> = {
-        ...(existingReport ? {id:existingReport.id,reportCode:existingReport.reportCode} : {}),
+        ...(savedRef.current ?? {}),
 
         employeeId: currentUser.id,
         employeeName: currentUser.name,
@@ -318,7 +403,7 @@ export const DailyReportForm: React.FC<DailyReportFormProps> = ({
         date,
         dayOfWeek: dayOfWeekName,
         reportingPeriod,
-        submittedToId: currentUser.supervisorId || '',
+        submittedToId: recipient?.id ?? '',
         submittedToName,
         startTime,
         endTime,
@@ -329,7 +414,8 @@ export const DailyReportForm: React.FC<DailyReportFormProps> = ({
         attachments
       };
 
-      await DailyReportService.saveDraft(payload, currentUser);
+      const draftSaved = await DailyReportService.saveDraft(payload, currentUser);
+      savedRef.current = { id: draftSaved.id, reportCode: draftSaved.reportCode };
       clearLocalDraft(draftKey);
       toast.success('Draft saved', { description: 'Your daily report is safely saved and ready to continue.' });
       onSaved();
@@ -343,12 +429,16 @@ export const DailyReportForm: React.FC<DailyReportFormProps> = ({
 
   // Submit Daily Report
   const handleConfirmSubmit = async () => {
+    // Ignore repeated clicks while a submission is already in flight.
+    if (submitLockRef.current) return;
+    if (!recipient) { toast.error('Recipient not available', { description: recipientError || 'Madam Ursula could not be loaded. Please try again.' }); return; }
     if (!validate()) return;
+    submitLockRef.current = true;
     setIsSaving(true);
     try {
       // First save draft state
       const payload: Partial<DailyReport> = {
-        ...(existingReport ? {id:existingReport.id,reportCode:existingReport.reportCode} : {}),
+        ...(savedRef.current ?? {}),
 
         employeeId: currentUser.id,
         employeeName: currentUser.name,
@@ -358,7 +448,7 @@ export const DailyReportForm: React.FC<DailyReportFormProps> = ({
         date,
         dayOfWeek: dayOfWeekName,
         reportingPeriod,
-        submittedToId: currentUser.supervisorId || '',
+        submittedToId: recipient?.id ?? '',
         submittedToName,
         startTime,
         endTime,
@@ -370,15 +460,18 @@ export const DailyReportForm: React.FC<DailyReportFormProps> = ({
       };
 
       const saved = await DailyReportService.saveDraft(payload, currentUser);
-      // Then submit
+      // Remember the saved id so a retry after a network failure updates this report instead of creating a second one.
+      savedRef.current = { id: saved.id, reportCode: saved.reportCode };
+      // Then submit (idempotent: an already-submitted report is not submitted or notified twice)
       await DailyReportService.submitReport(saved.id, currentUser);
       clearLocalDraft(draftKey);
-      toast.success('Daily report submitted', { description: 'Your report has been sent to your supervisor for review.' });
+      toast.success('Daily report submitted', { description: `Your report has been sent to ${submittedToName || 'Madam Ursula'} for review.` });
       setShowSubmitConfirm(false);
       onSaved();
       onNavigate('daily_report_detail', saved.id);
     } catch (err: any) {
       toast.error('Submission failed', { description: err.message || 'Please review the form and try again.' });
+      submitLockRef.current = false;
     } finally {
       setIsSaving(false);
     }
@@ -403,12 +496,12 @@ export const DailyReportForm: React.FC<DailyReportFormProps> = ({
               {isReturned ? 'Returned for Revision' : isEditing ? 'Edit Draft Report' : 'New Report Entry'}
             </span>
             <h1 className="text-xl sm:text-2xl font-bold text-foreground  leading-tight">
-              Plants & Pure Daily Report Sheet
+              {showForm || isEditing ? 'Plants & Pure Daily Report Sheet' : 'Daily Report'}
             </h1>
           </div>
         </div>
 
-        <div className="flex items-center gap-2.5">
+        {showForm && <div className="flex items-center gap-2.5">
           <Button variant="legacy"
             type="button"
             onClick={handleSaveDraft}
@@ -431,7 +524,7 @@ export const DailyReportForm: React.FC<DailyReportFormProps> = ({
             <Send className="w-4 h-4" />
             <span>{isReturned ? 'Resubmit Corrected Report' : 'Submit Daily Report'}</span>
           </Button>
-        </div>
+        </div>}
       </div>
 
       {/* Validation Alert */}
@@ -457,6 +550,29 @@ export const DailyReportForm: React.FC<DailyReportFormProps> = ({
         </div>
       )}
 
+      <DailyReportChat
+        employeeName={currentUser.name}
+        department={currentUser.department}
+        recipientName={submittedToName}
+        recipientError={recipientError}
+        getReport={() => reportRef.current}
+        onApplyDraft={applyChatDraft}
+        canUndo={canUndo}
+        onUndo={undoChatChange}
+        suggestions={activitySuggestions}
+        onUseSuggestion={(value) => { useActivitySuggestion(value); setManualMode(true); }}
+        onDismissSuggestion={(normalized) => setDismissedSuggestions(dismissSuggestion(currentUser.id, normalized))}
+        compact={isEditing}
+        hasDraft={showForm}
+        onReview={scrollToReview}
+        onFillManually={() => setManualMode(true)}
+      />
+
+      {showForm && <div id="report-review" className="scroll-mt-20 space-y-6">
+        <div className="rounded-xl border border-border bg-card px-4 py-3">
+          <h2 className="text-base font-bold text-foreground">Review your report</h2>
+          <p className="mt-0.5 text-xs text-muted-foreground">Check every field, edit anything that is wrong, add what is missing, then submit to {submittedToName || 'Madam Ursula'}. Each field has a microphone if you prefer to speak.</p>
+        </div>
       {/* Single-page section index */}
       <nav aria-label="Report sections" className="report-section-index sticky top-[64px] z-20 -mx-1 rounded-xl border border-border bg-card/95 backdrop-blur px-3 py-3 shadow-[var(--shadow-soft)]">
         <div className="flex flex-wrap items-center gap-2"><span className="text-xs font-semibold text-foreground mr-1">Complete all sections on this page:</span>{sectionProgress.map((section, i) => <a key={section.label} href={`#report-step-${i}`} className={`report-section-chip ${section.percent === 100 ? 'is-complete' : ''}`}><span>{i + 1}. {section.label}</span><span className="report-section-percent">{section.percent === 100 ? '✓' : `${section.percent}%`}</span></a>)}</div>
@@ -515,6 +631,8 @@ export const DailyReportForm: React.FC<DailyReportFormProps> = ({
             <input
               type="date"
               value={date}
+              min={minDate}
+              max={todayStr}
               onChange={(e) => setDate(e.target.value)}
               className="w-full px-3 py-2 text-xs rounded-lg border border-border  bg-card  text-foreground  font-medium focus:ring-2 focus:ring-primary"
               required
@@ -524,6 +642,9 @@ export const DailyReportForm: React.FC<DailyReportFormProps> = ({
                 Weekend dates are non-reporting days.
               </span>
             )}
+            <span className="text-[11px] text-muted-foreground mt-1 block">
+              You can fill in earlier days of this week (Week {reportingWeekNumber(new Date())}).
+            </span>
           </div>
 
           <div>
@@ -540,14 +661,15 @@ export const DailyReportForm: React.FC<DailyReportFormProps> = ({
 
           <div>
             <label className="block text-xs font-semibold text-muted-foreground  mb-1">
-              Submitted To (Supervisor/Manager)
+              Submitted To (fixed)
             </label>
-            <input
-              type="text"
-              value={submittedToName}
-              onChange={(e) => setSubmittedToName(e.target.value)}
-              className="w-full px-3 py-2 text-xs rounded-lg border border-border  bg-card  text-foreground  font-medium focus:ring-2 focus:ring-primary"
-            />
+            <div className="flex items-center gap-2 w-full px-3 py-2 text-xs rounded-lg border border-border bg-muted text-foreground font-medium" aria-live="polite">
+              <Lock className="size-3.5 shrink-0 text-muted-foreground" aria-hidden="true" />
+              <span>{recipient ? recipient.name : recipientError ? 'Madam Ursula (not available)' : 'Loading…'}</span>
+            </div>
+            <span className={`text-[11px] mt-1 block ${recipientError ? 'text-destructive' : 'text-muted-foreground'}`}>
+              {recipientError || 'All daily reports are sent to Madam Ursula automatically.'}
+            </span>
           </div>
 
           <div className="sm:col-span-2">
@@ -617,10 +739,7 @@ export const DailyReportForm: React.FC<DailyReportFormProps> = ({
                     <label className="block text-xs font-semibold text-foreground  mb-1">
                       Objective Assigned *
                     </label>
-                    <input
-                      type="text"
-                      value={obj.objective}
-                      onChange={(e) => updateObjective(obj.id, 'objective', e.target.value)}
+                    <VoiceInput voiceLabel="objective" value={obj.objective} onValueChange={(v) => updateObjective(obj.id, 'objective', v)}
                       placeholder="e.g. Pack and label spice orders for Friday delivery"
                       className="w-full px-3 py-2 text-xs rounded-lg border border-border  bg-card  text-foreground "
                       required
@@ -647,10 +766,7 @@ export const DailyReportForm: React.FC<DailyReportFormProps> = ({
                       <label className="block text-xs font-semibold text-foreground  mb-1">
                         Results / Figures / Quantity
                       </label>
-                      <input
-                        type="text"
-                        value={obj.resultsFigures}
-                        onChange={(e) => updateObjective(obj.id, 'resultsFigures', e.target.value)}
+                      <VoiceInput voiceLabel="results or figures" value={obj.resultsFigures} onValueChange={(v) => updateObjective(obj.id, 'resultsFigures', v)}
                         placeholder="e.g. 100% inspected, 24 bed trays verified"
                         className="w-full px-3 py-2 text-xs rounded-lg border border-border  bg-card  text-foreground "
                       />
@@ -662,10 +778,7 @@ export const DailyReportForm: React.FC<DailyReportFormProps> = ({
                       <label className="block text-xs font-semibold text-destructive  mb-1">
                         Reason if not completed * (Mandatory for compliance review)
                       </label>
-                      <input
-                        type="text"
-                        value={obj.reasonIfNotCompleted || ''}
-                        onChange={(e) => updateObjective(obj.id, 'reasonIfNotCompleted', e.target.value)}
+                      <VoiceInput voiceLabel="reason" value={obj.reasonIfNotCompleted || ''} onValueChange={(v) => updateObjective(obj.id, 'reasonIfNotCompleted', v)}
                         placeholder="Explain constraints, weather disruption, or material shortages..."
                         className="w-full px-3 py-2 text-xs rounded-lg border border-destructive  bg-destructive-soft/40  text-foreground "
                         required
@@ -701,6 +814,7 @@ export const DailyReportForm: React.FC<DailyReportFormProps> = ({
             <p className="text-xs text-muted-foreground ">
               Record what you did, where, when and how much.
             </p>
+            {activitySuggestions.length > 0 && <div className="mt-3 flex flex-wrap items-center gap-2"><span className="text-[11px] font-semibold text-muted-foreground">Your frequent activities:</span>{activitySuggestions.map((suggestion) => <span key={suggestion.normalized} className="inline-flex items-center gap-1 rounded-full border border-primary/25 bg-brand-wash px-2 py-1 text-[11px] text-accent-foreground"><button type="button" onClick={() => useActivitySuggestion(suggestion.value)} className="font-semibold hover:underline" title={`Use ${suggestion.value}`}>{suggestion.value}</button><button type="button" onClick={() => setDismissedSuggestions(dismissSuggestion(currentUser.id, suggestion.normalized))} className="rounded-full p-0.5 hover:bg-card" aria-label={`Dismiss ${suggestion.value}`}><X className="size-3" /></button></span>)}</div>}
           </div>
           <Button variant="legacy"
             type="button"
@@ -737,10 +851,7 @@ export const DailyReportForm: React.FC<DailyReportFormProps> = ({
                     <label className="block text-xs font-semibold text-foreground  mb-1">
                       Activity / Task Description *
                     </label>
-                    <input
-                      type="text"
-                      value={act.activityTask}
-                      onChange={(e) => updateActivity(act.id, 'activityTask', e.target.value)}
+                    <VoiceInput voiceLabel="activity description" value={act.activityTask} onValueChange={(v) => updateActivity(act.id, 'activityTask', v)}
                       placeholder="e.g. Botanical formulation mix Batch #42"
                       className="w-full px-3 py-2 text-xs rounded-lg border border-border  bg-card  text-foreground "
                       required
@@ -751,10 +862,7 @@ export const DailyReportForm: React.FC<DailyReportFormProps> = ({
                     <label className="block text-xs font-semibold text-foreground  mb-1">
                       Place / Person / Platform
                     </label>
-                    <input
-                      type="text"
-                      value={act.placePersonPlatform}
-                      onChange={(e) => updateActivity(act.id, 'placePersonPlatform', e.target.value)}
+                    <VoiceInput voiceLabel="place, person or platform" value={act.placePersonPlatform} onValueChange={(v) => updateActivity(act.id, 'placePersonPlatform', v)}
                       placeholder="e.g. Extraction Lab / Marcus Chen"
                       className="w-full px-3 py-2 text-xs rounded-lg border border-border  bg-card  text-foreground "
                     />
@@ -764,10 +872,7 @@ export const DailyReportForm: React.FC<DailyReportFormProps> = ({
                     <label className="block text-xs font-semibold text-foreground  mb-1">
                       Quantity / Figures
                     </label>
-                    <input
-                      type="text"
-                      value={act.quantityFigures}
-                      onChange={(e) => updateActivity(act.id, 'quantityFigures', e.target.value)}
+                    <VoiceInput voiceLabel="quantity or figures" value={act.quantityFigures} onValueChange={(v) => updateActivity(act.id, 'quantityFigures', v)}
                       placeholder="e.g. 50 liters, 120 units"
                       className="w-full px-3 py-2 text-xs rounded-lg border border-border  bg-card  text-foreground "
                     />
@@ -777,10 +882,7 @@ export const DailyReportForm: React.FC<DailyReportFormProps> = ({
                     <label className="block text-xs font-semibold text-foreground  mb-1">
                       Outcome / Deliverable
                     </label>
-                    <input
-                      type="text"
-                      value={act.outcome}
-                      onChange={(e) => updateActivity(act.id, 'outcome', e.target.value)}
+                    <VoiceInput voiceLabel="outcome" value={act.outcome} onValueChange={(v) => updateActivity(act.id, 'outcome', v)}
                       placeholder="e.g. Passed specific gravity quality test"
                       className="w-full px-3 py-2 text-xs rounded-lg border border-border  bg-card  text-foreground "
                     />
@@ -843,10 +945,7 @@ export const DailyReportForm: React.FC<DailyReportFormProps> = ({
                         <label className="block text-xs font-semibold text-foreground  mb-1">
                           Problem Encountered
                         </label>
-                        <input
-                          type="text"
-                          value={ch.problemEncountered}
-                          onChange={(e) => updateChallenge(ch.id, 'problemEncountered', e.target.value)}
+                        <VoiceInput voiceLabel="problem encountered" value={ch.problemEncountered} onValueChange={(v) => updateChallenge(ch.id, 'problemEncountered', v)}
                           placeholder="e.g. Sudden generator power dip paused distillation rig"
                           className="w-full px-3 py-2 text-xs rounded-lg border border-border  bg-card  text-foreground "
                         />
@@ -855,10 +954,7 @@ export const DailyReportForm: React.FC<DailyReportFormProps> = ({
                         <label className="block text-xs font-semibold text-foreground  mb-1">
                           When It Happened
                         </label>
-                        <input
-                          type="text"
-                          value={ch.whenHappened}
-                          onChange={(e) => updateChallenge(ch.id, 'whenHappened', e.target.value)}
+                        <VoiceInput voiceLabel="when it happened" value={ch.whenHappened} onValueChange={(v) => updateChallenge(ch.id, 'whenHappened', v)}
                           placeholder="e.g. 14:15 during second boil"
                           className="w-full px-3 py-2 text-xs rounded-lg border border-border  bg-card  text-foreground "
                         />
@@ -870,10 +966,7 @@ export const DailyReportForm: React.FC<DailyReportFormProps> = ({
                         <label className="block text-xs font-semibold text-foreground  mb-1">
                           Action Taken
                         </label>
-                        <input
-                          type="text"
-                          value={ch.actionTaken}
-                          onChange={(e) => updateChallenge(ch.id, 'actionTaken', e.target.value)}
+                        <VoiceInput voiceLabel="action taken" value={ch.actionTaken} onValueChange={(v) => updateChallenge(ch.id, 'actionTaken', v)}
                           placeholder="e.g. Switched to backup inverter and secured pressure valves"
                           className="w-full px-3 py-2 text-xs rounded-lg border border-border  bg-card  text-foreground "
                         />
@@ -940,10 +1033,7 @@ export const DailyReportForm: React.FC<DailyReportFormProps> = ({
                     <label className="block text-xs font-semibold text-foreground  mb-1">
                       Planned Task
                     </label>
-                    <input
-                      type="text"
-                      value={plan.plannedTask}
-                      onChange={(e) => updateTomorrowPlan(plan.id, 'plannedTask', e.target.value)}
+                    <VoiceInput voiceLabel="planned task" value={plan.plannedTask} onValueChange={(v) => updateTomorrowPlan(plan.id, 'plannedTask', v)}
                       placeholder="e.g. Bottle 100 units of eucalyptus oil"
                       className="w-full px-3 py-2 text-xs rounded-lg border border-border  bg-card  text-foreground "
                     />
@@ -953,10 +1043,7 @@ export const DailyReportForm: React.FC<DailyReportFormProps> = ({
                     <label className="block text-xs font-semibold text-foreground  mb-1">
                       Resources Needed
                     </label>
-                    <input
-                      type="text"
-                      value={plan.resourcesNeeded}
-                      onChange={(e) => updateTomorrowPlan(plan.id, 'resourcesNeeded', e.target.value)}
+                    <VoiceInput voiceLabel="resources needed" value={plan.resourcesNeeded} onValueChange={(v) => updateTomorrowPlan(plan.id, 'resourcesNeeded', v)}
                       placeholder="e.g. 100 amber bottles, tamper seals"
                       className="w-full px-3 py-2 text-xs rounded-lg border border-border  bg-card  text-foreground "
                     />
@@ -966,10 +1053,7 @@ export const DailyReportForm: React.FC<DailyReportFormProps> = ({
                     <label className="block text-xs font-semibold text-foreground  mb-1">
                       Approvals Required
                     </label>
-                    <input
-                      type="text"
-                      value={plan.approvalsRequired}
-                      onChange={(e) => updateTomorrowPlan(plan.id, 'approvalsRequired', e.target.value)}
+                    <VoiceInput voiceLabel="approvals required" value={plan.approvalsRequired} onValueChange={(v) => updateTomorrowPlan(plan.id, 'approvalsRequired', v)}
                       placeholder="e.g. Sarah Jenkins sign-off"
                       className="w-full px-3 py-2 text-xs rounded-lg border border-border  bg-card  text-foreground "
                     />
@@ -1080,6 +1164,8 @@ export const DailyReportForm: React.FC<DailyReportFormProps> = ({
           </Button>
         </div>
       </div>
+
+      </div>}
 
       {/* Pre-Submit Confirmation Modal */}
       {showSubmitConfirm && (

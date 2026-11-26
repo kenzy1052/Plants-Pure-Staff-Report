@@ -126,6 +126,58 @@ export interface DailyReport {
   updatedAt: string;
 }
 
+export interface NarrationDraftObjective {
+  /** Present when the AI is updating an item that already exists in the report. */
+  id?: string | undefined;
+  objective: string;
+  status: ObjectiveStatus;
+  resultsFigures: string;
+  reasonIfNotCompleted: string;
+}
+
+export interface NarrationDraftActivity {
+  id?: string | undefined;
+  task: string;
+  outcome: string;
+  placePersonPlatform: string;
+  quantityFigures: string;
+  /** Empty unless the employee explicitly gave a time. Format: "HH:MM - HH:MM" or "HH:MM - ". */
+  time: string;
+}
+
+export interface NarrationDraftChallenge {
+  id?: string | undefined;
+  problem: string;
+  whenHappened: string;
+  actionTaken: string;
+  resolved: boolean;
+}
+
+export interface NarrationDraftPlan {
+  id?: string | undefined;
+  task: string;
+  resourcesNeeded: string;
+  approvalsRequired: string;
+}
+
+/**
+ * Changes proposed by one chat message. Items with an `id` update the matching
+ * existing report row; items without an `id` are new rows. Nothing is removed
+ * unless its id is listed in `removeIds`.
+ */
+export interface StructuredNarrationDraft {
+  objectives: NarrationDraftObjective[];
+  activities: NarrationDraftActivity[];
+  pendingTasks: string[];
+  challenges: NarrationDraftChallenge[];
+  tomorrowPlans: NarrationDraftPlan[];
+  achievements: string[];
+  removeIds: string[];
+  /** A question for the employee when the message was ambiguous. Empty otherwise. */
+  clarification: string;
+  cleanedNarration: string;
+}
+
 export interface WeeklyObjectiveReview {
   date: string;
   dayName: string;

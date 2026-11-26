@@ -37,7 +37,7 @@ export const DEMO_USERS: User[] = [
   },
   {
     id: 'user_mgr',
-    name: 'Sarah Jenkins',
+    name: 'Madam Ursula',
     email: 'sarah.j@plantsandpure.com',
     role: 'manager',
     employeeId: 'PP-MGR-002',
@@ -55,7 +55,7 @@ export const DEMO_USERS: User[] = [
     department: 'Agriculture & Cultivation',
     roleTitle: 'Agriculture Officer',
     supervisorId: 'user_mgr',
-    supervisorName: 'Sarah Jenkins',
+    supervisorName: 'Madam Ursula',
   }
 ];
 
@@ -70,14 +70,14 @@ export const INITIAL_EMPLOYEES: Employee[] = [
     roleTitle: 'Agriculture Officer',
     department: 'Agriculture & Cultivation',
     supervisorId: 'user_mgr',
-    supervisorName: 'Sarah Jenkins',
+    supervisorName: 'Madam Ursula',
     status: 'active',
     dateAdded: '2026-01-15'
   },
   {
     id: 'user_mgr',
     employeeId: 'PP-MGR-002',
-    name: 'Sarah Jenkins',
+    name: 'Madam Ursula',
     email: 'sarah.j@plantsandpure.com',
     phone: '+234 802 884 9012',
     roleId: 'role_mgr',

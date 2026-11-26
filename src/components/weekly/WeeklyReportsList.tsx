@@ -11,11 +11,12 @@ import {
   CheckCircle2, 
   AlertCircle,
   ArrowRight,
-  FileSpreadsheet
+  FileSpreadsheet,
+  FileText
 } from 'lucide-react';
 import { WeeklyReport, User, DailyReport, Employee } from '../../types';
 import { WeeklyReportGeneratorModal } from './WeeklyReportGeneratorModal';
-import { exportWeeklyReportsToCSV, exportReportsToExcel } from '../../utils/exportUtils';
+import { exportWeeklyReportsToCSV, exportReportsToExcel, exportReportsToWord } from '../../utils/exportUtils';
 
 interface WeeklyReportsListProps {
   reports: WeeklyReport[];
@@ -99,6 +100,14 @@ export const WeeklyReportsList: React.FC<WeeklyReportsListProps> = ({
           >
             <FileSpreadsheet className="w-3.5 h-3.5 text-success " />
             <span>Export Excel (.xlsx)</span>
+          </Button>
+          <Button variant="legacy"
+            onClick={() => exportReportsToWord(dailyReports, filteredReports)}
+            className="flex items-center gap-1.5 px-3 py-2 bg-info-soft border border-info hover:bg-brand-wash text-info text-xs font-semibold rounded-lg transition-colors"
+            title="Download a formatted Word (.docx) document, grouped by week"
+          >
+            <FileText className="w-3.5 h-3.5" />
+            <span>Export Word (.docx)</span>
           </Button>
           <Button variant="legacy"
             onClick={() => exportWeeklyReportsToCSV(filteredReports)}

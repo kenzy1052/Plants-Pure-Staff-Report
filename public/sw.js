@@ -1,6 +1,6 @@
 // Minimal service worker: makes the app installable and keeps the app shell
 // available. Never caches data requests (Supabase / server functions).
-const CACHE = 'pp-shell-v3';
+const CACHE = 'pp-shell-v4';
 self.addEventListener('install', e => { self.skipWaiting(); });
 self.addEventListener('activate', e => {
   e.waitUntil(caches.keys().then(keys => Promise.all(keys.filter(k => k !== CACHE).map(k => caches.delete(k)))).then(() => self.clients.claim()));
@@ -8,7 +8,7 @@ self.addEventListener('activate', e => {
 self.addEventListener('fetch', e => {
   const r = e.request, url = new URL(r.url);
   if (r.method !== 'GET' || url.origin !== self.location.origin || url.pathname.startsWith('/_serverFn')) return;
-  if (url.pathname.startsWith('/assets/') || url.pathname.startsWith('/icons/')) {
+  if (url.pathname.startsWith('/assets/')) {
     e.respondWith(caches.match(r).then(hit => hit || fetch(r).then(res => { const copy = res.clone(); caches.open(CACHE).then(c => c.put(r, copy)); return res; })));
   }
 });
