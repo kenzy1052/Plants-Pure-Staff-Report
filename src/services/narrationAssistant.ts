@@ -49,7 +49,7 @@ const LOCAL_NOTICE = "The offline parser prepared this draft instead. It only co
 export async function structureNarration(input: { narration: string; department: string; knownActivities?: string[]; currentReport?: ReportState }): Promise<NarrationResult> {
   const narration = input.narration.trim().slice(0, MAX_NARRATION_LENGTH);
   if (!narration) throw new Error("Add a short narration before processing it.");
-  const local = (warning?: string): NarrationResult => ({ draft: parseNarrationLocally(narration), source: "local", fellBack: false, notice: warning ? `${warning} ${LOCAL_NOTICE}` : "The offline reporting parser prepared this demo draft. Please check every field.", ...(warning ? { warning } : {}) });
+  const local = (warning?: string): NarrationResult => ({ draft: parseNarrationLocally(narration, input.currentReport), source: "local", fellBack: false, notice: warning ? `${warning} ${LOCAL_NOTICE}` : "The offline reporting parser prepared this demo draft. Please check every field.", ...(warning ? { warning } : {}) });
   if (isDemoSession()) return local();
   try {
     const result = await structureNarrationServer({
@@ -63,6 +63,8 @@ export async function structureNarration(input: { narration: string; department:
     const provider = result.provider as AiProviderName;
     return { draft: result.draft as StructuredNarrationDraft, source: "ai", provider, fellBack: Boolean(result.fellBack), notice: describeProvider(provider, Boolean(result.fellBack)) };
   } catch (error) {
+    // Visible in the browser console (F12) and, for the provider detail, in the server log lines starting with [report-ai].
+    console.warn("[Kenzy] The AI could not prepare this draft, so the offline parser was used instead:", error);
     const reason = error instanceof Error && /Both AI providers/i.test(error.message) ? "Both Gemini and Groq were unavailable." : "The AI service could not be reached.";
     return local(reason);
   }

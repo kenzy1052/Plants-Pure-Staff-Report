@@ -55,6 +55,12 @@ export interface DailyActivity {
   placePersonPlatform: string;
   quantityFigures: string;
   outcome: string;
+  /**
+   * Optional link to the assigned objective this activity contributed to (an id from
+   * `DailyReport.objectives`). Stored inside the existing JSON payload, so no database
+   * change is needed, and older reports simply do not have it.
+   */
+  objectiveId?: string | undefined;
 }
 
 export interface DailyChallenge {
@@ -143,6 +149,8 @@ export interface NarrationDraftActivity {
   quantityFigures: string;
   /** Empty unless the employee explicitly gave a time. Format: "HH:MM - HH:MM" or "HH:MM - ". */
   time: string;
+  /** Id of an EXISTING objective in the report that this activity belongs to. Never a new objective. */
+  objectiveId?: string | undefined;
 }
 
 export interface NarrationDraftChallenge {

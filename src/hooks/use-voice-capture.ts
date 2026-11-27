@@ -18,11 +18,11 @@ import { transcribeAudio } from "@/services/narrationAssistant";
 
 export type VoiceStatus = "idle" | "starting" | "recording" | "transcribing";
 
-interface RecognitionEventLike extends Event {
+export interface RecognitionEventLike extends Event {
   resultIndex: number;
   results: ArrayLike<ArrayLike<{ transcript: string }> & { isFinal: boolean }>;
 }
-interface RecognitionLike {
+export interface RecognitionLike {
   continuous: boolean;
   interimResults: boolean;
   lang: string;
@@ -33,15 +33,15 @@ interface RecognitionLike {
   stop: () => void;
   abort: () => void;
 }
-type RecognitionCtor = new () => RecognitionLike;
+export type RecognitionCtor = new () => RecognitionLike;
 
-function recognitionCtor(): RecognitionCtor | undefined {
+export function recognitionCtor(): RecognitionCtor | undefined {
   if (typeof window === "undefined") return undefined;
   const w = window as Window & { SpeechRecognition?: RecognitionCtor; webkitSpeechRecognition?: RecognitionCtor };
   return w.SpeechRecognition ?? w.webkitSpeechRecognition;
 }
 
-function recorderSupported(): boolean {
+export function recorderSupported(): boolean {
   return typeof window !== "undefined" && typeof MediaRecorder !== "undefined" && Boolean(navigator.mediaDevices?.getUserMedia);
 }
 
@@ -54,6 +54,18 @@ const MAX_AUDIO_BYTES = 10 * 1024 * 1024;
 
 // Only one microphone session at a time across the whole page.
 let cancelActiveSession: (() => void) | null = null;
+
+/**
+ * Lets other voice hooks (the chat dictation) share the same one-microphone-at-a-time rule:
+ * starting a new session cancels whichever session was active before it.
+ */
+export function claimVoiceSession(cancel: () => void): void {
+  if (cancelActiveSession && cancelActiveSession !== cancel) cancelActiveSession();
+  cancelActiveSession = cancel;
+}
+export function releaseVoiceSession(cancel: () => void): void {
+  if (cancelActiveSession === cancel) cancelActiveSession = null;
+}
 
 export interface UseVoiceCaptureOptions {
   onTranscript: (text: string) => void;

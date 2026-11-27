@@ -2,39 +2,24 @@ import { reportingWeekNumber } from '@/utils/reportingWeek';
 import { startOfISOWeek, format as formatDate } from 'date-fns';
 import { toast } from 'sonner';
 import { readLocalDraft, writeLocalDraft, clearLocalDraft } from '@/lib/localDraft';
-import { Button } from "@/components/ui/button";
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { DailyReportChat } from './DailyReportChat';
-import { VoiceInput } from './VoiceField';
+import { KenzyFloating } from './KenzyMascot';
+import { VoiceInput, VoiceTextarea } from './VoiceField';
+import { AddButton, Disclosure, Field, RowShell, Segmented, SectionCard, type SectionStatus } from './ReportFormParts';
 import { dismissSuggestion, getActivitySuggestions, readDismissedSuggestions } from '@/services/activitySuggestions';
 import type { NarrationResult, StructuredNarrationDraft } from '@/services/narrationAssistant';
-import { mergeNarrationDraft, type MergeSummary, type ReportState } from '@/services/narrationParser';
+import { mergeNarrationDraft, undoMerge, type MergeRecord, type MergeSummary, type ReportState, type RowKind } from '@/services/narrationParser';
 import { getReportRecipient, type ReportRecipient } from '@/services/reportRecipient';
-import { 
-  ArrowLeft, 
-  Save, 
-  Send, 
-  Plus, 
-  Trash2, 
-  Upload, 
-  FileText, 
-  AlertCircle, 
-  CheckCircle2, 
-  Clock, 
-  Paperclip, 
-  X,
-  FileCheck,
-  Lock
-} from 'lucide-react';
-import { 
-  User, 
-  DailyReport, 
-  DailyObjective, 
-  DailyActivity, 
-  DailyChallenge, 
-  TomorrowPlan, 
-  EvidenceAttachment,
-  ObjectiveStatus 
+import { ArrowLeft, AlertCircle, FileCheck, Lock, Save, Send, Sparkles, Undo2, X } from 'lucide-react';
+import {
+  User,
+  DailyReport,
+  DailyObjective,
+  DailyActivity,
+  DailyChallenge,
+  TomorrowPlan,
+  ObjectiveStatus,
 } from '../../types';
 import { DailyReportService } from '../../services/storageService';
 
@@ -47,7 +32,24 @@ interface DailyReportFormProps {
   onSaved: () => void;
 }
 
-const REPORT_STEPS = ['Employee', 'Objectives', 'Activities', 'Challenges', 'Tomorrow', 'Evidence', 'Review'];
+/** The five sections of the approved daily report template, in order. */
+const SECTION_IDS = ['report-step-0', 'report-step-1', 'report-step-2', 'report-step-3', 'report-step-4'];
+const SECTION_NAMES = ['Report information', 'Assigned objectives and results', 'Activities performed', 'Challenges and actions taken', 'Plans for tomorrow'];
+const KIND_SECTION: Record<RowKind, number> = { objective: 1, activity: 2, challenge: 3, plan: 4 };
+
+const newId = (prefix: string) => `${prefix}_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
+const blankObjective = (): DailyObjective => ({ id: newId('obj'), objective: '', status: 'Done', resultsFigures: '', reasonIfNotCompleted: '' });
+const blankActivity = (): DailyActivity => ({ id: newId('act'), time: '', activityTask: '', placePersonPlatform: '', quantityFigures: '', outcome: '' });
+const blankChallenge = (): DailyChallenge => ({ id: newId('ch'), problemEncountered: '', whenHappened: '', actionTaken: '', resolved: false });
+const blankPlan = (): TomorrowPlan => ({ id: newId('pl'), plannedTask: '', resourcesNeeded: '', approvalsRequired: '' });
+
+interface Issue { key: string; section: number; message: string }
+
+const STATUS_OPTIONS: { value: ObjectiveStatus; label: string }[] = [
+  { value: 'Done', label: 'Done' },
+  { value: 'Partly Done', label: 'Partly done' },
+  { value: 'Not Done', label: 'Not done' },
+];
 
 export const DailyReportForm: React.FC<DailyReportFormProps> = ({
   currentUser,
@@ -55,16 +57,13 @@ export const DailyReportForm: React.FC<DailyReportFormProps> = ({
   initialDate,
   dailyReports = [],
   onNavigate,
-  onSaved
+  onSaved,
 }) => {
   const isEditing = !!existingReport;
   const isReturned = existingReport?.status === 'returned';
 
-  // Section 1: Employee info
-  const [date, setDate] = useState<string>(
-    existingReport?.date || initialDate || new Date().toISOString().slice(0,10)
-  );
-  const [step, setStep] = useState(0);
+  // A. Report information
+  const [date, setDate] = useState<string>(existingReport?.date || initialDate || new Date().toISOString().slice(0, 10));
   const [startTime, setStartTime] = useState<string>(existingReport?.startTime || '08:00');
   const [endTime, setEndTime] = useState<string>(existingReport?.endTime || '17:00');
   // The recipient is fixed (Madam Ursula) and resolved from the staff directory; employees cannot change it.
@@ -79,48 +78,29 @@ export const DailyReportForm: React.FC<DailyReportFormProps> = ({
     return () => { active = false; };
   }, []);
 
-  // Section 2: Objectives
-  const [objectives, setObjectives] = useState<DailyObjective[]>(
-    existingReport?.objectives?.length 
-      ? existingReport.objectives 
-      : [{ id: `obj_${Date.now()}_1`, objective: '', status: 'Done', resultsFigures: '', reasonIfNotCompleted: '' }]
-  );
+  // B-E. The four repeatable lists of the approved template
+  const [objectives, setObjectives] = useState<DailyObjective[]>(existingReport?.objectives?.length ? existingReport.objectives : [blankObjective()]);
+  const [activities, setActivities] = useState<DailyActivity[]>(existingReport?.activities?.length ? existingReport.activities : [blankActivity()]);
+  const [challenges, setChallenges] = useState<DailyChallenge[]>(existingReport?.challenges || []);
+  // One empty plan to start with; more are added one at a time with "+ Add another plan".
+  const [tomorrowPlans, setTomorrowPlans] = useState<TomorrowPlan[]>(existingReport?.tomorrowPlans?.length ? existingReport.tomorrowPlans : [blankPlan()]);
 
-  // Section 3: Activities
-  const [activities, setActivities] = useState<DailyActivity[]>(
-    existingReport?.activities?.length 
-      ? existingReport.activities 
-      : [{ id: `act_${Date.now()}_1`, time: '', activityTask: '', placePersonPlatform: '', quantityFigures: '', outcome: '' }]
-  );
-
-  // Section 4: Challenges
-  const [challenges, setChallenges] = useState<DailyChallenge[]>(
-    existingReport?.challenges || []
-  );
-
-  // Section 5: Tomorrow Plans
-  const [tomorrowPlans, setTomorrowPlans] = useState<TomorrowPlan[]>(
-    existingReport?.tomorrowPlans?.length 
-      ? existingReport.tomorrowPlans 
-      : [{ id: `pl_${Date.now()}_1`, plannedTask: '', resourcesNeeded: '', approvalsRequired: '' }]
-  );
-
-  // Section 6: Evidence Attachments
-  const [attachments, setAttachments] = useState<EvidenceAttachment[]>(
-    existingReport?.attachments || []
-  );
-  // Chat-first: a new report starts with the conversation; the form below is the review/edit surface.
-  const [chatApplied, setChatApplied] = useState(false);
-  const [manualMode, setManualMode] = useState(false);
-  const [canUndo, setCanUndo] = useState(false);
-  const undoRef = useRef<ReportState | null>(null);
+  // Kenzy: the form state is the single source of truth, Kenzy only proposes changes to it.
+  const [chatOpen, setChatOpen] = useState(false);
+  const [undoDepth, setUndoDepth] = useState(0);
+  const [bannerOpen, setBannerOpen] = useState(false);
+  const undoStack = useRef<MergeRecord[]>([]);
+  const [flash, setFlash] = useState<ReadonlySet<string>>(new Set());
+  const flashTimer = useRef<number | undefined>(undefined);
+  const [openSignals, setOpenSignals] = useState<number[]>([0, 0, 0, 0, 0]);
+  const fabRef = useRef<HTMLButtonElement>(null);
   const reportRef = useRef<ReportState>({ objectives, activities, challenges, tomorrowPlans });
   reportRef.current = { objectives, activities, challenges, tomorrowPlans };
   const submitLockRef = useRef(false);
   const savedRef = useRef<{ id: string; reportCode: string } | null>(existingReport ? { id: existingReport.id, reportCode: existingReport.reportCode } : null);
   const [dismissedSuggestions, setDismissedSuggestions] = useState<string[]>(() => readDismissedSuggestions(currentUser.id));
 
-  const [validationError, setValidationError] = useState<string | null>(null);
+  const [attempted, setAttempted] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
   const [showSubmitConfirm, setShowSubmitConfirm] = useState(false);
 
@@ -138,15 +118,12 @@ export const DailyReportForm: React.FC<DailyReportFormProps> = ({
     const d = readLocalDraft<any>(draftKey);
     if (d && (!existingReport || d.savedAt > (existingReport.updatedAt ?? ''))) {
       if (d.date) setDate(d.date);
-      setStep(d.step ?? 0);
       if (d.startTime) setStartTime(d.startTime);
       if (d.endTime) setEndTime(d.endTime);
       if (d.objectives?.length) setObjectives(d.objectives);
       if (d.activities?.length) setActivities(d.activities);
       if (d.challenges) setChallenges(d.challenges);
       if (d.tomorrowPlans?.length) setTomorrowPlans(d.tomorrowPlans);
-      if (d.attachments) setAttachments(d.attachments);
-      setManualMode(true);
       toast.info('Your unsaved report was restored', { description: 'You can continue exactly where you stopped.' });
     }
     setHydrated(true);
@@ -154,13 +131,15 @@ export const DailyReportForm: React.FC<DailyReportFormProps> = ({
   }, []);
   useEffect(() => {
     if (!hydrated) return;
-    const hasContent = objectives.some(o => o.objective.trim() || o.resultsFigures.trim()) || activities.some(a => a.activityTask.trim() || a.outcome.trim()) || challenges.length > 0 || tomorrowPlans.some(p => p.plannedTask.trim()) || attachments.length > 0;
+    const hasContent = objectives.some(o => o.objective.trim() || o.resultsFigures.trim()) || activities.some(a => a.activityTask.trim() || a.outcome.trim()) || challenges.length > 0 || tomorrowPlans.some(p => p.plannedTask.trim());
     if (!existingReport && !hasContent) return;
     const t = setTimeout(() => {
-      if (writeLocalDraft(draftKey, { date, step, startTime, endTime, objectives, activities, challenges, tomorrowPlans, attachments })) setLastLocalSave(new Date().toISOString());
+      if (writeLocalDraft(draftKey, { date, startTime, endTime, objectives, activities, challenges, tomorrowPlans })) setLastLocalSave(new Date().toISOString());
     }, 600);
     return () => clearTimeout(t);
-  }, [hydrated, date, step, startTime, endTime, objectives, activities, challenges, tomorrowPlans, attachments]);
+  }, [hydrated, date, startTime, endTime, objectives, activities, challenges, tomorrowPlans]);
+  useEffect(() => () => window.clearTimeout(flashTimer.current), []);
+
   // Determine day of week & ISO week
   const dateObj = new Date(date + 'T00:00:00');
   const dayOfWeekName = dateObj.toLocaleDateString('en-GB', { weekday: 'long' });
@@ -169,62 +148,49 @@ export const DailyReportForm: React.FC<DailyReportFormProps> = ({
   const todayStr = formatDate(new Date(), 'yyyy-MM-dd');
   const weekStartStr = formatDate(startOfISOWeek(new Date()), 'yyyy-MM-dd');
   const minDate = existingReport && existingReport.date < weekStartStr ? existingReport.date : weekStartStr;
-
-  // Calculate week number
-  const getWeekNumber = (d: Date) => reportingWeekNumber(d);
-  const weekNum = getWeekNumber(dateObj);
+  const weekNum = reportingWeekNumber(dateObj);
   const reportingPeriod = `Week ${weekNum}, ${dateObj.getFullYear()}`;
   const activitySuggestions = getActivitySuggestions(dailyReports, currentUser.id, { dismissed: dismissedSuggestions, excludeReportId: existingReport?.id });
 
-  const sectionProgress = [
-    ['Employee', [Boolean(date), Boolean(startTime), Boolean(endTime), Boolean(recipient)]],
-    ['Objectives', objectives.length ? objectives.map(objective => Boolean(objective.objective.trim()) && Boolean(objective.resultsFigures.trim()) && (objective.status === 'Done' || Boolean(objective.reasonIfNotCompleted?.trim()))) : [false]],
-    ['Activities', activities.length ? activities.map(activity => Boolean(activity.activityTask.trim()) && Boolean(activity.placePersonPlatform.trim()) && Boolean(activity.quantityFigures.trim()) && Boolean(activity.outcome.trim())) : [false]],
-    ['Challenges', challenges.length ? challenges.map(challenge => Boolean(challenge.problemEncountered.trim()) && Boolean(challenge.actionTaken.trim())) : [true]],
-    ['Tomorrow', tomorrowPlans.length ? tomorrowPlans.map(plan => Boolean(plan.plannedTask.trim()) && Boolean(plan.resourcesNeeded.trim()) && Boolean(plan.approvalsRequired.trim())) : [false]],
-    ['Evidence', [true]],
-  ].map(([label, checks]) => {
-    const values = checks as boolean[];
-    return { label: label as string, percent: Math.round((values.filter(Boolean).length / values.length) * 100) };
-  });
+  // ---- What is still missing (same rules the form has always enforced) ----
+  const issues: Issue[] = [];
+  if (!date) issues.push({ key: 'date', section: 0, message: 'Choose the date of this report.' });
+  else if (date > todayStr) issues.push({ key: 'date', section: 0, message: 'A report cannot be dated in the future.' });
+  else if (date < minDate) issues.push({ key: 'date', section: 0, message: `You can only back-date reports within the current reporting week (Week ${reportingWeekNumber(new Date())}).` });
+  else if (isWeekend) issues.push({ key: 'date', section: 0, message: 'Choose a weekday. Daily reports are accepted Monday to Friday.' });
+  if (!startTime || !endTime) issues.push({ key: 'hours', section: 0, message: 'Add both a start time and an end time.' });
+  else if (startTime >= endTime) issues.push({ key: 'hours', section: 0, message: 'The end time must be after the start time.' });
+  const filledObjectives = objectives.filter((o) => o.objective.trim());
+  if (!filledObjectives.length) issues.push({ key: 'objectives', section: 1, message: 'Add at least one objective you were assigned today.' });
+  for (const o of filledObjectives) {
+    if ((o.status === 'Partly Done' || o.status === 'Not Done') && !o.reasonIfNotCompleted?.trim()) issues.push({ key: `reason:${o.id}`, section: 1, message: 'Tell us why this was not finished.' });
+  }
+  if (!activities.some((a) => a.activityTask.trim())) issues.push({ key: 'activities', section: 2, message: 'Add at least one thing you did today.' });
+  const issueFor = (key: string) => (attempted ? issues.find((i) => i.key === key)?.message : undefined);
 
-  // Objectives handlers
-  const addObjective = () => {
-    setObjectives([
-      ...objectives,
-      { id: `obj_${Date.now()}_${Math.random().toString(36).substring(2, 5)}`, objective: '', status: 'Done', resultsFigures: '', reasonIfNotCompleted: '' }
-    ]);
-  };
+  const hasIssue = (section: number) => issues.some((i) => i.section === section);
+  const statuses: SectionStatus[] = [
+    hasIssue(0) ? 'incomplete' : 'complete',
+    hasIssue(1) ? 'incomplete' : 'complete',
+    hasIssue(2) ? 'incomplete' : 'complete',
+    challenges.length === 0 ? 'optional' : challenges.every((c) => c.problemEncountered.trim()) ? 'complete' : 'incomplete',
+    tomorrowPlans.some((p) => p.plannedTask.trim()) ? 'complete' : 'optional',
+  ];
+  const navState = (index: number) => (statuses[index] === 'complete' ? 'complete' : statuses[index] === 'incomplete' && attempted ? 'warn' : 'idle');
 
+  // ---- Row handlers ----
+  const addObjective = () => setObjectives((rows) => [...rows, blankObjective()]);
   const removeObjective = (id: string) => {
-    if (objectives.length > 1) {
-      setObjectives(objectives.filter(o => o.id !== id));
-    }
+    setObjectives((rows) => (rows.length > 1 ? rows.filter((o) => o.id !== id) : rows));
+    // An activity linked to a removed objective is simply unlinked.
+    setActivities((rows) => rows.map((a) => (a.objectiveId === id ? { ...a, objectiveId: undefined } : a)));
   };
+  const updateObjective = (id: string, patch: Partial<DailyObjective>) => setObjectives((rows) => rows.map((o) => (o.id === id ? { ...o, ...patch } : o)));
 
-  const updateObjective = (id: string, field: keyof DailyObjective, value: any) => {
-    setObjectives(objectives.map(o => o.id === id ? { ...o, [field]: value } : o));
-  };
-
-  // Activities handlers
-  const addActivity = () => {
-    setActivities([
-      ...activities,
-      { id: `act_${Date.now()}_${Math.random().toString(36).substring(2, 5)}`, time: '', activityTask: '', placePersonPlatform: '', quantityFigures: '', outcome: '' }
-    ]);
-  };
-
-  const removeActivity = (id: string) => {
-    if (activities.length > 1) {
-      setActivities(activities.filter(a => a.id !== id));
-    }
-  };
-
-  const updateActivity = (id: string, field: keyof DailyActivity, value: any) => {
-    setActivities(activities.map(a => a.id === id ? { ...a, [field]: value } : a));
-  };
-
-  const useActivitySuggestion = (value: string) => {
+  const addActivity = () => setActivities((rows) => [...rows, blankActivity()]);
+  const removeActivity = (id: string) => setActivities((rows) => (rows.length > 1 ? rows.filter((a) => a.id !== id) : rows));
+  const updateActivity = (id: string, patch: Partial<DailyActivity>) => setActivities((rows) => rows.map((a) => (a.id === id ? { ...a, ...patch } : a)));
+  const addSuggestedActivity = (value: string) => {
     const normalized = value.trim().toLocaleLowerCase();
     if (activities.some((activity) => activity.activityTask.trim().toLocaleLowerCase() === normalized)) {
       toast.info('Already added', { description: 'That activity is already in this report.' });
@@ -232,189 +198,115 @@ export const DailyReportForm: React.FC<DailyReportFormProps> = ({
     }
     setActivities((current) => {
       const blankIndex = current.findIndex((activity) => !activity.activityTask.trim());
-      if (blankIndex >= 0) return current.map((activity, index) => index === blankIndex ? { ...activity, activityTask: value } : activity);
-      return [...current, { id: `act_${Date.now()}_${Math.random().toString(36).substring(2, 5)}`, time: '', activityTask: value, placePersonPlatform: '', quantityFigures: '', outcome: '' }];
+      if (blankIndex >= 0) return current.map((activity, index) => (index === blankIndex ? { ...activity, activityTask: value } : activity));
+      return [...current, { ...blankActivity(), activityTask: value }];
     });
+  };
+
+  const addChallenge = () => setChallenges((rows) => [...rows, blankChallenge()]);
+  const removeChallenge = (id: string) => setChallenges((rows) => rows.filter((c) => c.id !== id));
+  const updateChallenge = (id: string, patch: Partial<DailyChallenge>) => setChallenges((rows) => rows.map((c) => (c.id === id ? { ...c, ...patch } : c)));
+
+  const addTomorrowPlan = () => setTomorrowPlans((rows) => [...rows, blankPlan()]);
+  const removeTomorrowPlan = (id: string) => setTomorrowPlans((rows) => (rows.length > 1 ? rows.filter((p) => p.id !== id) : rows));
+  const updateTomorrowPlan = (id: string, patch: Partial<TomorrowPlan>) => setTomorrowPlans((rows) => rows.map((p) => (p.id === id ? { ...p, ...patch } : p)));
+
+  // ---- Kenzy <-> form ----
+  const applyState = (next: ReportState) => {
+    setObjectives(next.objectives);
+    setActivities(next.activities);
+    setChallenges(next.challenges);
+    setTomorrowPlans(next.tomorrowPlans);
+  };
+
+  const highlight = (ids: string[], kinds: Set<RowKind>) => {
+    window.clearTimeout(flashTimer.current);
+    setFlash(new Set(ids));
+    setOpenSignals((signals) => signals.map((value, index) => ([...kinds].some((kind) => KIND_SECTION[kind] === index) ? value + 1 : value)));
+    flashTimer.current = window.setTimeout(() => setFlash(new Set()), 5000);
   };
 
   const applyChatDraft = (draft: StructuredNarrationDraft, _result: NarrationResult): MergeSummary => {
-    const before = reportRef.current;
-    const { next, summary } = mergeNarrationDraft(before, draft);
+    const { next, summary } = mergeNarrationDraft(reportRef.current, draft);
     if (summary.added + summary.updated + summary.removed > 0) {
-      undoRef.current = before;
-      setCanUndo(true);
-      setObjectives(next.objectives);
-      setActivities(next.activities);
-      setChallenges(next.challenges);
-      setTomorrowPlans(next.tomorrowPlans);
+      undoStack.current.push(summary.record);
+      setUndoDepth(undoStack.current.length);
+      setBannerOpen(true);
+      applyState(next);
+      const kinds = new Set<RowKind>([...summary.record.added, ...summary.record.updated].map((change) => change.kind));
+      highlight(summary.touched, kinds);
     }
-    setChatApplied(true);
     return summary;
   };
 
-  const undoChatChange = () => {
-    const previous = undoRef.current;
-    if (!previous) return;
-    setObjectives(previous.objectives);
-    setActivities(previous.activities);
-    setChallenges(previous.challenges);
-    setTomorrowPlans(previous.tomorrowPlans);
-    undoRef.current = null;
-    setCanUndo(false);
-    toast.info('Last chat change undone');
+  const undoLastKenzyChange = useCallback((): string => {
+    const record = undoStack.current.pop();
+    setUndoDepth(undoStack.current.length);
+    if (!record) return '';
+    const { next, keptEdited } = undoMerge(reportRef.current, record);
+    applyState(next);
+    setFlash(new Set());
+    if (!undoStack.current.length) setBannerOpen(false);
+    const kept = keptEdited ? ` I kept ${keptEdited === 1 ? 'one item' : `${keptEdited} items`} you edited yourself afterwards.` : '';
+    toast.info('Kenzy\'s last change was undone', { description: keptEdited ? 'Items you edited yourself were kept.' : 'Everything you typed yourself is unchanged.' });
+    return `Done. I've undone my last change.${kept}`;
+  }, []);
+
+  const openChat = () => setChatOpen(true);
+  const closeChat = () => { setChatOpen(false); window.requestAnimationFrame(() => fabRef.current?.focus()); };
+
+  const reviewReport = () => {
+    if (window.matchMedia?.('(max-width: 639px)').matches) setChatOpen(false);
+    window.setTimeout(() => {
+      const firstFlashed = [...flash][0];
+      const target = (firstFlashed && document.getElementById(`row-${firstFlashed}`)) || document.getElementById(SECTION_IDS[1] ?? 'report-step-1');
+      target?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    }, 120);
   };
 
-  const scrollToReview = () => document.getElementById('report-review')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
-  const showForm = isEditing || chatApplied || manualMode;
-
-  // Challenges handlers
-  const addChallenge = () => {
-    setChallenges([
-      ...challenges,
-      { id: `ch_${Date.now()}_${Math.random().toString(36).substring(2, 5)}`, problemEncountered: '', whenHappened: '', actionTaken: '', resolved: false }
-    ]);
+  // ---- Validation, saving and submitting ----
+  const scrollToIssue = (issue: Issue) => {
+    setOpenSignals((signals) => signals.map((value, index) => (index === issue.section ? value + 1 : value)));
+    window.setTimeout(() => document.getElementById(SECTION_IDS[issue.section] ?? 'report-step-0')?.scrollIntoView({ behavior: 'smooth', block: 'start' }), 60);
   };
 
-  const removeChallenge = (id: string) => {
-    setChallenges(challenges.filter(c => c.id !== id));
-  };
-
-  const updateChallenge = (id: string, field: keyof DailyChallenge, value: any) => {
-    setChallenges(challenges.map(c => c.id === id ? { ...c, [field]: value } : c));
-  };
-
-  // Tomorrow Plans handlers
-  const addTomorrowPlan = () => {
-    setTomorrowPlans([
-      ...tomorrowPlans,
-      { id: `pl_${Date.now()}_${Math.random().toString(36).substring(2, 5)}`, plannedTask: '', resourcesNeeded: '', approvalsRequired: '' }
-    ]);
-  };
-
-  const removeTomorrowPlan = (id: string) => {
-    if (tomorrowPlans.length > 1) {
-      setTomorrowPlans(tomorrowPlans.filter(p => p.id !== id));
+  const requestSubmit = () => {
+    setAttempted(true);
+    const first = issues[0];
+    if (first) {
+      toast.error('A few things still need your attention', { description: first.message });
+      scrollToIssue(first);
+      return;
     }
+    setShowSubmitConfirm(true);
   };
 
-  const updateTomorrowPlan = (id: string, field: keyof TomorrowPlan, value: any) => {
-    setTomorrowPlans(tomorrowPlans.map(p => p.id === id ? { ...p, [field]: value } : p));
-  };
+  const buildPayload = (filterBlank: boolean): Partial<DailyReport> => ({
+    ...(savedRef.current ?? {}),
+    employeeId: currentUser.id,
+    employeeName: currentUser.name,
+    employeeCode: currentUser.employeeId,
+    roleTitle: currentUser.roleTitle,
+    department: currentUser.department,
+    date,
+    dayOfWeek: dayOfWeekName,
+    reportingPeriod,
+    submittedToId: recipient?.id ?? '',
+    submittedToName,
+    startTime,
+    endTime,
+    objectives: filterBlank ? objectives.filter((o) => o.objective.trim().length > 0) : objectives,
+    activities: filterBlank ? activities.filter((a) => a.activityTask.trim().length > 0) : activities,
+    challenges: filterBlank ? challenges.filter((c) => c.problemEncountered.trim().length > 0) : challenges,
+    tomorrowPlans: filterBlank ? tomorrowPlans.filter((p) => p.plannedTask.trim().length > 0) : tomorrowPlans,
+    // Evidence upload was removed from the form, but attachments already stored on an existing report are kept untouched.
+    attachments: existingReport?.attachments ?? [],
+  });
 
-  // File upload handler (IndexedDB dataUrl)
-  const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const files = e.target.files;
-    if (!files || files.length === 0) return;
-
-    Array.from(files).forEach(file => {
-      // Validate file size (< 10MB)
-      if (file.size > 10 * 1024 * 1024) {
-        toast.error('File too large', { description: `${file.name} is over the 10 MB limit.` });
-        return;
-      }
-
-      const reader = new FileReader();
-      reader.onload = (event) => {
-        const dataUrl = event.target?.result as string;
-        const newAttachment: EvidenceAttachment = {
-          id: `att_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
-          name: file.name,
-          type: file.type || 'application/octet-stream',
-          size: file.size,
-          dataUrl,
-          uploadedAt: new Date().toISOString()
-        };
-        setAttachments(prev => [...prev, newAttachment]);
-      };
-      reader.readAsDataURL(file);
-    });
-  };
-
-  const removeAttachment = (id: string) => {
-    setAttachments(attachments.filter(a => a.id !== id));
-  };
-
-  // Validation logic
-  const validate = (): boolean => {
-    setValidationError(null);
-
-    if (date > todayStr) {
-      toast.error('Date not allowed', { description: 'A report cannot be dated in the future.' });
-      return false;
-    }
-    if (date < minDate) {
-      toast.error('Date not allowed', { description: `You can only back-date reports within the current reporting week (Week ${reportingWeekNumber(new Date())}).` });
-      return false;
-    }
-
-    if (isWeekend) {
-      toast.error('Choose a weekday', { description: 'Ordinary daily reports are accepted Monday through Friday.' });
-      return false;
-    }
-
-    if (!startTime || !endTime) {
-      toast.error('Working hours required', { description: 'Add both a start and end time before submitting.' });
-      return false;
-    }
-
-    if (startTime >= endTime) {
-      toast.error('Check working hours', { description: 'End time must be after start time.' });
-      return false;
-    }
-
-    // Check at least one objective has a description
-    const validObjectives = objectives.filter(o => o.objective.trim().length > 0);
-    if (validObjectives.length === 0) {
-      toast.error('Objective required', { description: 'Record at least one assigned objective for today.' });
-      return false;
-    }
-
-    // Check reason if incomplete
-    for (const obj of validObjectives) {
-      if ((obj.status === 'Partly Done' || obj.status === 'Not Done') && !obj.reasonIfNotCompleted?.trim()) {
-        toast.error('Add an incomplete reason', { description: `Explain why “${obj.objective}” was not completed.` });
-        return false;
-      }
-    }
-
-    // Check activities
-    const validActivities = activities.filter(a => a.activityTask.trim().length > 0);
-    if (validActivities.length === 0) {
-      toast.error('Activity required', { description: 'Document at least one completed activity.' });
-      return false;
-    }
-
-    return true;
-  };
-
-  // Save as Draft
   const handleSaveDraft = async () => {
     setIsSaving(true);
-    setValidationError(null);
     try {
-      const payload: Partial<DailyReport> = {
-        ...(savedRef.current ?? {}),
-
-        employeeId: currentUser.id,
-        employeeName: currentUser.name,
-        employeeCode: currentUser.employeeId,
-        roleTitle: currentUser.roleTitle,
-        department: currentUser.department,
-        date,
-        dayOfWeek: dayOfWeekName,
-        reportingPeriod,
-        submittedToId: recipient?.id ?? '',
-        submittedToName,
-        startTime,
-        endTime,
-        objectives,
-        activities,
-        challenges,
-        tomorrowPlans,
-        attachments
-      };
-
-      const draftSaved = await DailyReportService.saveDraft(payload, currentUser);
+      const draftSaved = await DailyReportService.saveDraft(buildPayload(false), currentUser);
       savedRef.current = { id: draftSaved.id, reportCode: draftSaved.reportCode };
       clearLocalDraft(draftKey);
       toast.success('Draft saved', { description: 'Your daily report is safely saved and ready to continue.' });
@@ -427,39 +319,15 @@ export const DailyReportForm: React.FC<DailyReportFormProps> = ({
     }
   };
 
-  // Submit Daily Report
   const handleConfirmSubmit = async () => {
     // Ignore repeated clicks while a submission is already in flight.
     if (submitLockRef.current) return;
     if (!recipient) { toast.error('Recipient not available', { description: recipientError || 'Madam Ursula could not be loaded. Please try again.' }); return; }
-    if (!validate()) return;
+    if (issues.length) { setShowSubmitConfirm(false); requestSubmit(); return; }
     submitLockRef.current = true;
     setIsSaving(true);
     try {
-      // First save draft state
-      const payload: Partial<DailyReport> = {
-        ...(savedRef.current ?? {}),
-
-        employeeId: currentUser.id,
-        employeeName: currentUser.name,
-        employeeCode: currentUser.employeeId,
-        roleTitle: currentUser.roleTitle,
-        department: currentUser.department,
-        date,
-        dayOfWeek: dayOfWeekName,
-        reportingPeriod,
-        submittedToId: recipient?.id ?? '',
-        submittedToName,
-        startTime,
-        endTime,
-        objectives: objectives.filter(o => o.objective.trim().length > 0),
-        activities: activities.filter(a => a.activityTask.trim().length > 0),
-        challenges: challenges.filter(c => c.problemEncountered.trim().length > 0),
-        tomorrowPlans: tomorrowPlans.filter(p => p.plannedTask.trim().length > 0),
-        attachments
-      };
-
-      const saved = await DailyReportService.saveDraft(payload, currentUser);
+      const saved = await DailyReportService.saveDraft(buildPayload(true), currentUser);
       // Remember the saved id so a retry after a network failure updates this report instead of creating a second one.
       savedRef.current = { id: saved.id, reportCode: saved.reportCode };
       // Then submit (idempotent: an already-submitted report is not submitted or notified twice)
@@ -477,755 +345,269 @@ export const DailyReportForm: React.FC<DailyReportFormProps> = ({
     }
   };
 
-  return (
-    <div className="daily-report-page w-full max-w-none space-y-6 pb-12">
-      {!online && <div role="status" className="rounded-lg border border-border bg-brand-wash px-4 py-3 text-sm text-foreground">You are offline. Keep typing — your work is saved on this device. Press Submit once your data is back.</div>}
-      {lastLocalSave && <p className="-mb-3 text-xs text-muted-foreground">Autosaved on this device at {new Date(lastLocalSave).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })}</p>}
-      {/* Top Navigation & Actions Bar */}
-      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 bg-card  p-4 sm:p-6 rounded-lg border border-border  shadow-xs">
-        <div className="flex items-center gap-3">
-          <Button variant="legacy"
-            onClick={() => onNavigate('daily_reports')}
-            className="p-2 text-muted-foreground hover:text-foreground  rounded-lg hover:bg-muted  transition-colors"
-            title="Back to Reports"
-          >
-            <ArrowLeft className="w-5 h-5" />
-          </Button>
-          <div>
-            <span className="text-xs font-semibold text-primary uppercase tracking-normal">
-              {isReturned ? 'Returned for Revision' : isEditing ? 'Edit Draft Report' : 'New Report Entry'}
-            </span>
-            <h1 className="text-xl sm:text-2xl font-bold text-foreground  leading-tight">
-              {showForm || isEditing ? 'Plants & Pure Daily Report Sheet' : 'Daily Report'}
-            </h1>
-          </div>
-        </div>
+  const filledObjectiveOptions = objectives.filter((o) => o.objective.trim());
+  const isFlashed = (id: string) => flash.has(id);
 
-        {showForm && <div className="flex items-center gap-2.5">
-          <Button variant="legacy"
-            type="button"
-            onClick={handleSaveDraft}
-            disabled={isSaving}
-            className="flex items-center gap-1.5 px-4 py-2 border border-border  hover:bg-muted  text-foreground  text-xs sm:text-sm font-semibold rounded-lg transition-colors"
-          >
-            <Save className="w-4 h-4 text-muted-foreground" />
-            <span>Save Draft</span>
-          </Button>
-          <Button variant="legacy"
-            type="button"
-            onClick={() => {
-              if (validate()) {
-                setShowSubmitConfirm(true);
-              } else { setStep(6); }
-            }}
-            disabled={isSaving}
-            className="flex items-center gap-1.5 px-5 py-2 bg-primary hover:bg-primary text-primary-foreground text-xs sm:text-sm font-semibold rounded-lg shadow-sm transition-colors"
-          >
-            <Send className="w-4 h-4" />
-            <span>{isReturned ? 'Resubmit Corrected Report' : 'Submit Daily Report'}</span>
-          </Button>
-        </div>}
+  return (
+    <div className="daily-report-page mx-auto w-full max-w-4xl space-y-5 pb-32 md:pb-28">
+      {!online && <div role="status" className="rounded-lg border border-border bg-brand-wash px-4 py-3 text-sm text-foreground">You are offline. Keep typing — your work is saved on this device. Press Submit once your data is back.</div>}
+
+      {/* Title and main actions */}
+      <div className="flex flex-col gap-3 rounded-xl border border-border bg-card p-4 shadow-[var(--shadow-soft)] sm:flex-row sm:items-center sm:justify-between sm:p-5">
+        <div className="min-w-0">
+          <button type="button" onClick={() => onNavigate('daily_reports')} className="pp-btn pp-btn-ghost pp-btn-sm -ml-2 mb-1"><ArrowLeft className="size-4" aria-hidden="true" />Back to my reports</button>
+          <p className="text-xs font-bold uppercase tracking-wide text-brand-strong">{isReturned ? 'Returned for correction' : isEditing ? 'Editing your report' : 'New daily report'}</p>
+          <h1 className="text-xl font-bold leading-tight text-foreground sm:text-2xl">Plants &amp; Pure Daily Report</h1>
+          <p className="mt-1 text-sm text-muted-foreground">{dayOfWeekName}, {dateObj.toLocaleDateString('en-GB', { day: 'numeric', month: 'long', year: 'numeric' })} · {reportingPeriod}</p>
+        </div>
+        <div className="grid shrink-0 grid-cols-2 gap-2 sm:flex">
+          <button type="button" onClick={handleSaveDraft} disabled={isSaving} className="pp-btn pp-btn-outline"><Save className="size-4" aria-hidden="true" />Save draft</button>
+          <button type="button" onClick={requestSubmit} disabled={isSaving} className="pp-btn pp-btn-primary"><Send className="size-4" aria-hidden="true" />{isReturned ? 'Resubmit' : 'Submit report'}</button>
+        </div>
       </div>
 
-      {/* Validation Alert */}
-      {validationError && (
-        <div className="p-4 bg-destructive-soft  border border-destructive  rounded-lg flex items-start gap-3">
-          <AlertCircle className="w-5 h-5 text-destructive  shrink-0 mt-0.5" />
-          <div className="text-xs sm:text-sm text-destructive  font-medium">
-            {validationError}
-          </div>
-        </div>
-      )}
-
-      {/* Returned Feedback Banner if report was returned */}
       {isReturned && existingReport?.reviews && existingReport.reviews.length > 0 && (
-        <div className="p-4 bg-warning-soft  border border-warning  rounded-lg">
-          <div className="flex items-center gap-2 text-xs font-bold text-warning  uppercase tracking-normal mb-1">
-            <AlertCircle className="w-4 h-4 text-warning" />
-            <span>Supervisor Correction Note from {existingReport.reviews.at(-1)?.reviewerName}</span>
-          </div>
-          <p className="text-xs sm:text-sm text-warning  italic">
-            "{existingReport.reviews.at(-1)?.comments}"
-          </p>
+        <div className="rounded-xl border border-warning bg-warning-soft p-4">
+          <div className="mb-1 flex items-center gap-2 text-xs font-bold uppercase tracking-wide text-warning"><AlertCircle className="size-4" aria-hidden="true" /><span>Correction note from {existingReport.reviews.at(-1)?.reviewerName}</span></div>
+          <p className="text-sm italic text-foreground">“{existingReport.reviews.at(-1)?.comments}”</p>
         </div>
       )}
 
+      {/* Where to start + section navigation */}
+      <nav aria-label="Report sections" className="sticky top-[64px] z-20 -mx-1 rounded-xl border border-border bg-card/95 px-3 py-2.5 shadow-[var(--shadow-soft)] backdrop-blur">
+        <p className="mb-2 hidden text-[13px] text-muted-foreground sm:block">
+          {isEditing ? 'Update any section below.' : <>Start at section 1 and work down. Or tap <strong className="text-foreground">Kenzy</strong> at the bottom right and just tell him about your day.</>}
+        </p>
+        <div className="pp-nav">
+          {SECTION_NAMES.map((name, index) => (
+            <a key={name} href={`#${SECTION_IDS[index]}`} data-state={navState(index)} className="pp-nav-chip" onClick={(event) => { event.preventDefault(); document.getElementById(SECTION_IDS[index] ?? '')?.scrollIntoView({ behavior: 'smooth', block: 'start' }); }}>
+              <span aria-hidden="true">{statuses[index] === 'complete' ? '✓' : index + 1}</span>
+              {name.split(' and ')[0]}
+              <span className="sr-only">{statuses[index] === 'complete' ? ' — complete' : statuses[index] === 'optional' ? ' — optional' : ' — still to do'}</span>
+            </a>
+          ))}
+        </div>
+      </nav>
+
+      {bannerOpen && undoDepth > 0 && (
+        <div role="status" className="flex flex-wrap items-center gap-3 rounded-xl border border-primary/30 bg-brand-wash px-4 py-3">
+          <Sparkles className="size-5 shrink-0 text-brand-strong" aria-hidden="true" />
+          <p className="min-w-0 flex-1 text-sm font-medium text-foreground">Kenzy updated your report. Please check it. Changed items are marked below.</p>
+          <button type="button" onClick={() => { undoLastKenzyChange(); }} className="pp-btn pp-btn-outline pp-btn-sm"><Undo2 className="size-4" aria-hidden="true" />Undo Kenzy's change</button>
+          <button type="button" onClick={() => setBannerOpen(false)} className="pp-btn pp-btn-ghost pp-btn-sm" aria-label="Hide this message"><X className="size-4" aria-hidden="true" /></button>
+        </div>
+      )}
+
+      {/* A. REPORT INFORMATION */}
+      <SectionCard id={SECTION_IDS[0]!} step={1} title="Report information" description="Check the date and your working hours. Everything else is filled in for you." status={statuses[0]!} attempted={attempted} summary={`${dayOfWeekName} · ${startTime} to ${endTime}`} error={issueFor('date') ?? issueFor('hours')} openSignal={openSignals[0] ?? 0}>
+        <dl className="grid grid-cols-1 gap-x-6 gap-y-2 text-sm sm:grid-cols-2">
+          <div><dt className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Employee</dt><dd className="font-medium text-foreground">{currentUser.name}</dd></div>
+          <div><dt className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Staff ID and role</dt><dd className="font-medium text-foreground">{currentUser.employeeId} · {currentUser.roleTitle}</dd></div>
+          <div><dt className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Department</dt><dd className="font-medium text-foreground">{currentUser.department}</dd></div>
+          <div>
+            <dt className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Report goes to</dt>
+            <dd className="flex items-center gap-1.5 font-medium text-foreground" aria-live="polite"><Lock className="size-3.5 text-muted-foreground" aria-hidden="true" />{recipient ? recipient.name : recipientError ? 'Madam Ursula (not available)' : 'Loading…'}</dd>
+            {recipientError && <p role="alert" className="text-[13px] text-destructive">{recipientError}</p>}
+          </div>
+        </dl>
+        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+          <Field label="Date of this report" htmlFor="report-date" required hint={`You can fill in earlier days of this week (Week ${reportingWeekNumber(new Date())}).`} error={issueFor('date')}>
+            <input id="report-date" type="date" value={date} min={minDate} max={todayStr} onChange={(e) => setDate(e.target.value)} required aria-invalid={Boolean(issueFor('date'))} className="w-full" />
+          </Field>
+          <Field label="Working hours" required hint="When did your working day start and end?" error={issueFor('hours')}>
+            <div className="grid grid-cols-2 gap-2">
+              <div><span className="mb-0.5 block text-xs text-muted-foreground">From</span><input type="time" aria-label="Start time" value={startTime} onChange={(e) => setStartTime(e.target.value)} required aria-invalid={Boolean(issueFor('hours'))} className="w-full" /></div>
+              <div><span className="mb-0.5 block text-xs text-muted-foreground">To</span><input type="time" aria-label="End time" value={endTime} onChange={(e) => setEndTime(e.target.value)} required aria-invalid={Boolean(issueFor('hours'))} className="w-full" /></div>
+            </div>
+          </Field>
+        </div>
+      </SectionCard>
+
+      {/* B. ASSIGNED OBJECTIVES AND RESULTS */}
+      <SectionCard id={SECTION_IDS[1]!} step={2} title="Assigned objectives and results" description="What you were asked to achieve today, and how it went. Write the task, say if it was finished, and give the result." status={statuses[1]!} attempted={attempted} summary={`${filledObjectives.length} objective${filledObjectives.length === 1 ? '' : 's'}`} error={issueFor('objectives')} openSignal={openSignals[1] ?? 0}>
+        {objectives.map((obj, index) => (
+          <RowShell key={obj.id} rowId={`row-${obj.id}`} index={index} total={objectives.length} label="Objective" flashed={isFlashed(obj.id)} onRemove={objectives.length > 1 ? () => removeObjective(obj.id) : undefined} removeLabel={`Remove objective ${index + 1}`}>
+            <Field label="What were you asked to do?" htmlFor={`${obj.id}-objective`} required hint="The task given to you by your supervisor or manager.">
+              <VoiceInput id={`${obj.id}-objective`} voiceLabel="objective" value={obj.objective} onValueChange={(v) => updateObjective(obj.id, { objective: v })} placeholder="e.g. Prepare promotional materials for the Christmas campaign" className="w-full" />
+            </Field>
+            <Field label="Was it finished?" required>
+              <Segmented label="Was this objective finished?" value={obj.status} onChange={(status) => updateObjective(obj.id, { status, ...(status === 'Done' ? { reasonIfNotCompleted: '' } : {}) })} options={STATUS_OPTIONS} />
+            </Field>
+            {(obj.status === 'Partly Done' || obj.status === 'Not Done') && (
+              <Field label="Why was it not finished?" htmlFor={`${obj.id}-reason`} required error={issueFor(`reason:${obj.id}`)}>
+                <VoiceInput id={`${obj.id}-reason`} voiceLabel="reason" value={obj.reasonIfNotCompleted || ''} onValueChange={(v) => updateObjective(obj.id, { reasonIfNotCompleted: v })} placeholder="e.g. Waiting for the final product images" aria-invalid={Boolean(issueFor(`reason:${obj.id}`))} className="w-full" />
+              </Field>
+            )}
+            <Field label="Result achieved" htmlFor={`${obj.id}-results`} hint="What came out of it? Numbers help. You can leave this empty if there is nothing to add.">
+              <VoiceInput id={`${obj.id}-results`} voiceLabel="results or figures" value={obj.resultsFigures} onValueChange={(v) => updateObjective(obj.id, { resultsFigures: v })} placeholder="e.g. 3 flyers and 2 videos completed and published" className="w-full" />
+            </Field>
+          </RowShell>
+        ))}
+        <AddButton onClick={addObjective}>Add another objective</AddButton>
+      </SectionCard>
+
+      {/* C. ACTIVITIES PERFORMED */}
+      <SectionCard id={SECTION_IDS[2]!} step={3} title="Activities performed" description="Everything you actually did today. Add each task separately." status={statuses[2]!} attempted={attempted} summary={`${activities.filter((a) => a.activityTask.trim()).length} activit${activities.filter((a) => a.activityTask.trim()).length === 1 ? 'y' : 'ies'}`} error={issueFor('activities')} openSignal={openSignals[2] ?? 0}>
+        {activitySuggestions.length > 0 && (
+          <div className="rounded-lg bg-brand-wash/70 p-3">
+            <p className="mb-2 text-[13px] font-semibold text-foreground">Did you do any of these again today? Tap to add.</p>
+            <div className="flex flex-wrap gap-2">
+              {activitySuggestions.map((suggestion) => (
+                <span key={suggestion.normalized} className="inline-flex max-w-full items-center rounded-full border border-primary/30 bg-card text-[13px] text-foreground">
+                  <button type="button" onClick={() => addSuggestedActivity(suggestion.value)} className="min-h-9 truncate rounded-l-full py-1 pl-3 pr-2 text-left font-semibold hover:bg-muted" title={`Add “${suggestion.value}”`}>{suggestion.value}</button>
+                  <button type="button" onClick={() => setDismissedSuggestions(dismissSuggestion(currentUser.id, suggestion.normalized))} className="grid size-9 place-items-center rounded-r-full text-muted-foreground hover:bg-muted" aria-label={`Hide the suggestion ${suggestion.value}`}><X className="size-3.5" aria-hidden="true" /></button>
+                </span>
+              ))}
+            </div>
+          </div>
+        )}
+        {activities.map((act, index) => {
+          const [startPart = '', endPart = ''] = (act.time || '').split('-').map((x) => x.trim());
+          const setTime = (start: string, end: string) => updateActivity(act.id, { time: start || end ? `${start} - ${end}` : '' });
+          const detailSummary = [act.placePersonPlatform, act.quantityFigures, act.outcome, act.time && `at ${act.time.replace(/\s*-\s*$/, '')}`].filter(Boolean).join(' · ');
+          return (
+            <RowShell key={act.id} rowId={`row-${act.id}`} index={index} total={activities.length} label="Activity" flashed={isFlashed(act.id)} onRemove={activities.length > 1 ? () => removeActivity(act.id) : undefined} removeLabel={`Remove activity ${index + 1}`}>
+              <Field label="What did you do?" htmlFor={`${act.id}-task`} required>
+                <VoiceTextarea id={`${act.id}-task`} voiceLabel="activity description" rows={2} value={act.activityTask} onValueChange={(v) => updateActivity(act.id, { activityTask: v })} placeholder="e.g. Designed three promotional flyers for the Christmas campaign" className="min-h-14 w-full" />
+              </Field>
+              <Disclosure label="Add details (where, how many, result, time)" summary={detailSummary} autoOpen={Boolean(detailSummary) && (isFlashed(act.id) || false)}>
+                <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                  <Field label="Where, who or which platform?" htmlFor={`${act.id}-place`}>
+                    <input id={`${act.id}-place`} type="text" value={act.placePersonPlatform} onChange={(e) => updateActivity(act.id, { placePersonPlatform: e.target.value })} placeholder="e.g. Production department, or Facebook" className="w-full" />
+                  </Field>
+                  <Field label="How many?" htmlFor={`${act.id}-qty`} hint="Only if it can be counted.">
+                    <input id={`${act.id}-qty`} type="text" value={act.quantityFigures} onChange={(e) => updateActivity(act.id, { quantityFigures: e.target.value })} placeholder="e.g. 3 flyers" className="w-full" />
+                  </Field>
+                </div>
+                <Field label="Result or outcome" htmlFor={`${act.id}-outcome`} hint="Only if there is something to add beyond the task itself.">
+                  <input id={`${act.id}-outcome`} type="text" value={act.outcome} onChange={(e) => updateActivity(act.id, { outcome: e.target.value })} placeholder="e.g. Approved by the manager" className="w-full" />
+                </Field>
+                <Field label="Time (optional)">
+                  <div className="grid grid-cols-2 gap-2">
+                    <div><span className="mb-0.5 block text-xs text-muted-foreground">From</span><input type="time" aria-label={`Activity ${index + 1} start time`} value={startPart} onChange={(e) => setTime(e.target.value, endPart)} className="w-full" /></div>
+                    <div><span className="mb-0.5 block text-xs text-muted-foreground">To</span><input type="time" aria-label={`Activity ${index + 1} end time`} value={endPart} onChange={(e) => setTime(startPart, e.target.value)} className="w-full" /></div>
+                  </div>
+                </Field>
+                {filledObjectiveOptions.length > 0 && (
+                  <Field label="Which objective was this for? (optional)" htmlFor={`${act.id}-objective`} hint="Links this activity to one of the objectives in section 2, so you do not have to repeat yourself.">
+                    <select id={`${act.id}-objective`} value={act.objectiveId && filledObjectiveOptions.some((o) => o.id === act.objectiveId) ? act.objectiveId : ''} onChange={(e) => updateActivity(act.id, { objectiveId: e.target.value || undefined })} className="w-full">
+                      <option value="">Not linked to an objective</option>
+                      {filledObjectiveOptions.map((o) => <option key={o.id} value={o.id}>{o.objective.length > 70 ? `${o.objective.slice(0, 70)}…` : o.objective}</option>)}
+                    </select>
+                  </Field>
+                )}
+              </Disclosure>
+            </RowShell>
+          );
+        })}
+        <AddButton onClick={addActivity}>Add another activity</AddButton>
+      </SectionCard>
+
+      {/* D. CHALLENGES AND ACTIONS TAKEN */}
+      <SectionCard id={SECTION_IDS[3]!} step={4} title="Challenges and actions taken" description="Did anything go wrong or get in your way? Say what happened and what you did about it. You can skip this if there were no problems." status={statuses[3]!} attempted={attempted} summary={challenges.length ? `${challenges.length} challenge${challenges.length === 1 ? '' : 's'}` : 'No challenges today'} openSignal={openSignals[3] ?? 0}>
+        {challenges.length === 0 ? (
+          <div className="rounded-lg border border-dashed border-border bg-muted/50 px-4 py-5 text-center">
+            <p className="text-sm font-medium text-foreground">No challenges reported for today.</p>
+            <p className="mt-0.5 text-[13px] text-muted-foreground">If something delayed you or went wrong, add it here.</p>
+          </div>
+        ) : challenges.map((ch, index) => (
+          <RowShell key={ch.id} rowId={`row-${ch.id}`} index={index} total={challenges.length} label="Challenge" flashed={isFlashed(ch.id)} onRemove={() => removeChallenge(ch.id)} removeLabel={`Remove challenge ${index + 1}`}>
+            <Field label="What went wrong or got in your way?" htmlFor={`${ch.id}-problem`} required>
+              <VoiceTextarea id={`${ch.id}-problem`} voiceLabel="problem encountered" rows={2} value={ch.problemEncountered} onValueChange={(v) => updateChallenge(ch.id, { problemEncountered: v })} placeholder="e.g. Could not finish the catalogue because the product images were late" className="min-h-14 w-full" />
+            </Field>
+            <Field label="What did you do about it?" htmlFor={`${ch.id}-action`} hint="Leave this empty if you have not done anything yet.">
+              <VoiceInput id={`${ch.id}-action`} voiceLabel="action taken" value={ch.actionTaken} onValueChange={(v) => updateChallenge(ch.id, { actionTaken: v })} placeholder="e.g. Asked the photographer to send them first thing tomorrow" className="w-full" />
+            </Field>
+            <div className="grid grid-cols-1 items-end gap-3 sm:grid-cols-2">
+              <Field label="When did it happen? (optional)" htmlFor={`${ch.id}-when`}>
+                <input id={`${ch.id}-when`} type="text" value={ch.whenHappened} onChange={(e) => updateChallenge(ch.id, { whenHappened: e.target.value })} placeholder="e.g. Around 2 pm" className="w-full" />
+              </Field>
+              <label className="flex min-h-11 cursor-pointer items-center gap-3 rounded-lg border border-border bg-card px-3 text-sm font-semibold text-foreground">
+                <input type="checkbox" checked={ch.resolved} onChange={(e) => updateChallenge(ch.id, { resolved: e.target.checked })} className="size-5" />
+                This problem is solved
+              </label>
+            </div>
+          </RowShell>
+        ))}
+        <AddButton onClick={addChallenge}>{challenges.length ? 'Add another challenge' : 'Add a challenge'}</AddButton>
+      </SectionCard>
+
+      {/* E. PLANS FOR TOMORROW */}
+      <SectionCard id={SECTION_IDS[4]!} step={5} title="Plans for tomorrow" description="What do you intend to work on tomorrow? Add one plan at a time." status={statuses[4]!} attempted={attempted} summary={`${tomorrowPlans.filter((p) => p.plannedTask.trim()).length} plan${tomorrowPlans.filter((p) => p.plannedTask.trim()).length === 1 ? '' : 's'}`} openSignal={openSignals[4] ?? 0}>
+        {tomorrowPlans.map((plan, index) => (
+          <RowShell key={plan.id} rowId={`row-${plan.id}`} index={index} total={tomorrowPlans.length} label="Plan" flashed={isFlashed(plan.id)} onRemove={tomorrowPlans.length > 1 ? () => removeTomorrowPlan(plan.id) : undefined} removeLabel={`Remove plan ${index + 1}`}>
+            <Field label="What do you intend to work on tomorrow?" htmlFor={`${plan.id}-task`}>
+              <VoiceInput id={`${plan.id}-task`} voiceLabel="planned task" value={plan.plannedTask} onValueChange={(v) => updateTomorrowPlan(plan.id, { plannedTask: v })} placeholder="e.g. Complete the product catalogue" className="w-full" />
+            </Field>
+            <Disclosure label="Add support or approval needed (optional)" summary={[plan.resourcesNeeded, plan.approvalsRequired].filter(Boolean).join(' · ')} autoOpen={Boolean(plan.resourcesNeeded.trim() || plan.approvalsRequired.trim())}>
+              <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                <Field label="Resources or support needed" htmlFor={`${plan.id}-res`}>
+                  <input id={`${plan.id}-res`} type="text" value={plan.resourcesNeeded} onChange={(e) => updateTomorrowPlan(plan.id, { resourcesNeeded: e.target.value })} placeholder="e.g. Final product images" className="w-full" />
+                </Field>
+                <Field label="Approval needed, and from whom" htmlFor={`${plan.id}-appr`}>
+                  <input id={`${plan.id}-appr`} type="text" value={plan.approvalsRequired} onChange={(e) => updateTomorrowPlan(plan.id, { approvalsRequired: e.target.value })} placeholder="e.g. Manager sign-off" className="w-full" />
+                </Field>
+              </div>
+            </Disclosure>
+          </RowShell>
+        ))}
+        <AddButton onClick={addTomorrowPlan}>Add another plan</AddButton>
+      </SectionCard>
+
+      {/* Final actions */}
+      <div className="pp-action-bar">
+        <p className="text-[13px] text-muted-foreground">
+          {lastLocalSave ? `Saved on this device at ${new Date(lastLocalSave).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })}. ` : ''}
+          {issues.length ? `${issues.length} thing${issues.length === 1 ? '' : 's'} left before you can submit.` : 'Everything required is filled in.'}
+        </p>
+        <div className="flex flex-wrap gap-2">
+          <button type="button" onClick={handleSaveDraft} disabled={isSaving} className="pp-btn pp-btn-outline"><Save className="size-4" aria-hidden="true" />Save draft</button>
+          <button type="button" onClick={requestSubmit} disabled={isSaving} className="pp-btn pp-btn-primary"><Send className="size-4" aria-hidden="true" />{isReturned ? 'Resubmit report' : 'Submit report'}</button>
+        </div>
+      </div>
+
+      {/* Kenzy: small floating helper, plus the chat overlay. The form above is never replaced by it. */}
+      {!chatOpen && <KenzyFloating ref={fabRef} onOpen={openChat} liftOnMobile />}
       <DailyReportChat
+        open={chatOpen}
+        onClose={closeChat}
         employeeName={currentUser.name}
         department={currentUser.department}
         recipientName={submittedToName}
         recipientError={recipientError}
         getReport={() => reportRef.current}
+        knownActivities={activitySuggestions.map((s) => s.value)}
         onApplyDraft={applyChatDraft}
-        canUndo={canUndo}
-        onUndo={undoChatChange}
-        suggestions={activitySuggestions}
-        onUseSuggestion={(value) => { useActivitySuggestion(value); setManualMode(true); }}
-        onDismissSuggestion={(normalized) => setDismissedSuggestions(dismissSuggestion(currentUser.id, normalized))}
-        compact={isEditing}
-        hasDraft={showForm}
-        onReview={scrollToReview}
-        onFillManually={() => setManualMode(true)}
+        undoDepth={undoDepth}
+        onUndo={undoLastKenzyChange}
+        onReview={reviewReport}
       />
 
-      {showForm && <div id="report-review" className="scroll-mt-20 space-y-6">
-        <div className="rounded-xl border border-border bg-card px-4 py-3">
-          <h2 className="text-base font-bold text-foreground">Review your report</h2>
-          <p className="mt-0.5 text-xs text-muted-foreground">Check every field, edit anything that is wrong, add what is missing, then submit to {submittedToName || 'Madam Ursula'}. Each field has a microphone if you prefer to speak.</p>
-        </div>
-      {/* Single-page section index */}
-      <nav aria-label="Report sections" className="report-section-index sticky top-[64px] z-20 -mx-1 rounded-xl border border-border bg-card/95 backdrop-blur px-3 py-3 shadow-[var(--shadow-soft)]">
-        <div className="flex flex-wrap items-center gap-2"><span className="text-xs font-semibold text-foreground mr-1">Complete all sections on this page:</span>{sectionProgress.map((section, i) => <a key={section.label} href={`#report-step-${i}`} className={`report-section-chip ${section.percent === 100 ? 'is-complete' : ''}`}><span>{i + 1}. {section.label}</span><span className="report-section-percent">{section.percent === 100 ? '✓' : `${section.percent}%`}</span></a>)}</div>
-      </nav>
-
-      {/* SECTION 1: EMPLOYEE INFORMATION */}
-      <div id="report-step-0" className="bg-card p-5 sm:p-7 rounded-xl border border-border shadow-[var(--shadow-soft)] space-y-5 fade-up">
-        <div className="border-b border-border  pb-3">
-          <span className="text-xs font-bold uppercase tracking-normal text-primary">Section 1</span>
-          <h2 className="text-base font-bold text-foreground ">
-            Employee & Shift Information
-          </h2>
-        </div>
-
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
-          <div>
-            <label className="block text-xs font-semibold text-muted-foreground  mb-1">
-              Employee Name (Auto)
-            </label>
-            <input
-              type="text"
-              readOnly
-              value={currentUser.name}
-              className="w-full px-3 py-2 text-xs rounded-lg border border-border  bg-muted  text-foreground  font-medium"
-            />
-          </div>
-
-          <div>
-            <label className="block text-xs font-semibold text-muted-foreground  mb-1">
-              Staff ID & Role (Auto)
-            </label>
-            <input
-              type="text"
-              readOnly
-              value={`${currentUser.employeeId} · ${currentUser.roleTitle}`}
-              className="w-full px-3 py-2 text-xs rounded-lg border border-border  bg-muted  text-foreground  font-medium"
-            />
-          </div>
-
-          <div>
-            <label className="block text-xs font-semibold text-muted-foreground  mb-1">
-              Department (Auto)
-            </label>
-            <input
-              type="text"
-              readOnly
-              value={currentUser.department}
-              className="w-full px-3 py-2 text-xs rounded-lg border border-border  bg-muted  text-foreground  font-medium"
-            />
-          </div>
-
-          <div>
-            <label className="block text-xs font-semibold text-muted-foreground  mb-1">
-              Reporting Date *
-            </label>
-            <input
-              type="date"
-              value={date}
-              min={minDate}
-              max={todayStr}
-              onChange={(e) => setDate(e.target.value)}
-              className="w-full px-3 py-2 text-xs rounded-lg border border-border  bg-card  text-foreground  font-medium focus:ring-2 focus:ring-primary"
-              required
-            />
-            {isWeekend && (
-              <span className="text-[11px] text-destructive font-medium mt-1 block">
-                Weekend dates are non-reporting days.
-              </span>
-            )}
-            <span className="text-[11px] text-muted-foreground mt-1 block">
-              You can fill in earlier days of this week (Week {reportingWeekNumber(new Date())}).
-            </span>
-          </div>
-
-          <div>
-            <label className="block text-xs font-semibold text-muted-foreground  mb-1">
-              Day & Reporting Period (Auto)
-            </label>
-            <input
-              type="text"
-              readOnly
-              value={`${dayOfWeekName} · ${reportingPeriod}`}
-              className="w-full px-3 py-2 text-xs rounded-lg border border-border  bg-muted  text-foreground  font-medium"
-            />
-          </div>
-
-          <div>
-            <label className="block text-xs font-semibold text-muted-foreground  mb-1">
-              Submitted To (fixed)
-            </label>
-            <div className="flex items-center gap-2 w-full px-3 py-2 text-xs rounded-lg border border-border bg-muted text-foreground font-medium" aria-live="polite">
-              <Lock className="size-3.5 shrink-0 text-muted-foreground" aria-hidden="true" />
-              <span>{recipient ? recipient.name : recipientError ? 'Madam Ursula (not available)' : 'Loading…'}</span>
-            </div>
-            <span className={`text-[11px] mt-1 block ${recipientError ? 'text-destructive' : 'text-muted-foreground'}`}>
-              {recipientError || 'All daily reports are sent to Madam Ursula automatically.'}
-            </span>
-          </div>
-
-          <div className="sm:col-span-2">
-            <div className="flex items-center justify-between mb-1">
-              <label className="text-xs font-semibold text-muted-foreground ">
-                Official Working Hours *
-              </label>
-              <span className="text-[11px] text-muted-foreground">Tap to choose a time</span>
-            </div>
-            <div className="grid grid-cols-2 gap-2">
-              <div>
-                <input
-                  type="time"
-                  aria-label="Start time"
-                                    value={startTime}
-                  onChange={(e) => setStartTime(e.target.value)}
-                  className="w-full px-3 py-2 text-xs rounded-lg border border-border  bg-card  text-foreground  font-medium focus:ring-2 focus:ring-primary"
-                  required
-                />
-              </div>
-              <div>
-                <input
-                  type="time"
-                  aria-label="End time"
-                                    value={endTime}
-                  onChange={(e) => setEndTime(e.target.value)}
-                  className="w-full px-3 py-2 text-xs rounded-lg border border-border  bg-card  text-foreground  font-medium focus:ring-2 focus:ring-primary"
-                  required
-                />
-              </div>
-            </div>
-          </div>
-        </div>
-      </div>
-
-      {/* SECTION 2: TODAY'S OBJECTIVES */}
-      <div id="report-step-1" className="bg-card p-5 sm:p-7 rounded-xl border border-border shadow-[var(--shadow-soft)] space-y-5 fade-up">
-        <div className="flex items-center justify-between border-b border-border  pb-3">
-          <div>
-            <span className="text-xs font-bold uppercase tracking-normal text-primary">Section 2</span>
-            <h2 className="text-base font-bold text-foreground ">
-              Today's Objectives
-            </h2>
-            <p className="text-xs text-muted-foreground ">
-              Objectives assigned by the CEO, Administrator, or departmental supervisor.
-            </p>
-          </div>
-          <Button variant="legacy"
-            type="button"
-            onClick={addObjective}
-            className="flex items-center gap-1 px-3 py-1.5 text-xs font-semibold text-primary  hover:bg-brand-wash  rounded-lg border border-primary/40 transition-colors"
-          >
-            <Plus className="w-3.5 h-3.5" />
-            <span>Add Objective</span>
-          </Button>
-        </div>
-
-        <div className="space-y-4">
-          {objectives.map((obj, index) => (
-            <div key={obj.id} className="p-4 rounded-lg border border-border  bg-muted/50  space-y-3">
-              <div className="flex items-start justify-between gap-3">
-                <span className="text-xs font-bold text-muted-foreground mt-2">
-                  #{index + 1}
-                </span>
-                <div className="flex-1 space-y-2">
-                  <div>
-                    <label className="block text-xs font-semibold text-foreground  mb-1">
-                      Objective Assigned *
-                    </label>
-                    <VoiceInput voiceLabel="objective" value={obj.objective} onValueChange={(v) => updateObjective(obj.id, 'objective', v)}
-                      placeholder="e.g. Pack and label spice orders for Friday delivery"
-                      className="w-full px-3 py-2 text-xs rounded-lg border border-border  bg-card  text-foreground "
-                      required
-                    />
-                  </div>
-
-                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-                    <div>
-                      <label className="block text-xs font-semibold text-foreground  mb-1">
-                        Completion Status *
-                      </label>
-                      <select
-                        value={obj.status}
-                        onChange={(e) => updateObjective(obj.id, 'status', e.target.value as ObjectiveStatus)}
-                        className="w-full px-3 py-2 text-xs rounded-lg border border-border  bg-card  text-foreground  font-medium"
-                      >
-                        <option value="Done">Done (Completed)</option>
-                        <option value="Partly Done">Partly Done</option>
-                        <option value="Not Done">Not Done</option>
-                      </select>
-                    </div>
-
-                    <div className="sm:col-span-2">
-                      <label className="block text-xs font-semibold text-foreground  mb-1">
-                        Results / Figures / Quantity
-                      </label>
-                      <VoiceInput voiceLabel="results or figures" value={obj.resultsFigures} onValueChange={(v) => updateObjective(obj.id, 'resultsFigures', v)}
-                        placeholder="e.g. 100% inspected, 24 bed trays verified"
-                        className="w-full px-3 py-2 text-xs rounded-lg border border-border  bg-card  text-foreground "
-                      />
-                    </div>
-                  </div>
-
-                  {(obj.status === 'Partly Done' || obj.status === 'Not Done') && (
-                    <div>
-                      <label className="block text-xs font-semibold text-destructive  mb-1">
-                        Reason if not completed * (Mandatory for compliance review)
-                      </label>
-                      <VoiceInput voiceLabel="reason" value={obj.reasonIfNotCompleted || ''} onValueChange={(v) => updateObjective(obj.id, 'reasonIfNotCompleted', v)}
-                        placeholder="Explain constraints, weather disruption, or material shortages..."
-                        className="w-full px-3 py-2 text-xs rounded-lg border border-destructive  bg-destructive-soft/40  text-foreground "
-                        required
-                      />
-                    </div>
-                  )}
-                </div>
-
-                {objectives.length > 1 && (
-                  <Button variant="legacy"
-                    type="button"
-                    onClick={() => removeObjective(obj.id)}
-                    className="p-1.5 text-muted-foreground hover:text-destructive transition-colors"
-                    title="Remove objective"
-                  >
-                    <Trash2 className="w-4 h-4" />
-                  </Button>
-                )}
-              </div>
-            </div>
-          ))}
-        </div>
-      </div>
-
-      {/* SECTION 3: ACTIVITY DETAILS */}
-      <div id="report-step-2" className="bg-card p-5 sm:p-7 rounded-xl border border-border shadow-[var(--shadow-soft)] space-y-5 fade-up">
-        <div className="flex items-center justify-between border-b border-border  pb-3">
-          <div>
-            <span className="text-xs font-bold uppercase tracking-normal text-primary">Section 3</span>
-            <h2 className="text-base font-bold text-foreground ">
-              Activity Details
-            </h2>
-            <p className="text-xs text-muted-foreground ">
-              Record what you did, where, when and how much.
-            </p>
-            {activitySuggestions.length > 0 && <div className="mt-3 flex flex-wrap items-center gap-2"><span className="text-[11px] font-semibold text-muted-foreground">Your frequent activities:</span>{activitySuggestions.map((suggestion) => <span key={suggestion.normalized} className="inline-flex items-center gap-1 rounded-full border border-primary/25 bg-brand-wash px-2 py-1 text-[11px] text-accent-foreground"><button type="button" onClick={() => useActivitySuggestion(suggestion.value)} className="font-semibold hover:underline" title={`Use ${suggestion.value}`}>{suggestion.value}</button><button type="button" onClick={() => setDismissedSuggestions(dismissSuggestion(currentUser.id, suggestion.normalized))} className="rounded-full p-0.5 hover:bg-card" aria-label={`Dismiss ${suggestion.value}`}><X className="size-3" /></button></span>)}</div>}
-          </div>
-          <Button variant="legacy"
-            type="button"
-            onClick={addActivity}
-            className="flex items-center gap-1 px-3 py-1.5 text-xs font-semibold text-primary  hover:bg-brand-wash  rounded-lg border border-primary/40 transition-colors"
-          >
-            <Plus className="w-3.5 h-3.5" />
-            <span>Add Activity</span>
-          </Button>
-        </div>
-
-        <div className="space-y-4">
-          {activities.map((act, index) => (
-            <div key={act.id} className="p-4 rounded-lg border border-border  bg-muted/50  space-y-3">
-              <div className="flex items-start justify-between gap-3">
-                <span className="text-xs font-bold text-muted-foreground mt-2">
-                  #{index + 1}
-                </span>
-                <div className="flex-1 grid grid-cols-1 sm:grid-cols-12 gap-3">
-                  <div className="sm:col-span-12 lg:col-span-4">
-                    <div className="flex items-center justify-between mb-1">
-                      <label className="text-xs font-semibold text-foreground ">
-                        Time Range
-                      </label>
-                    </div>
-                    {(() => { const [st = '', en = ''] = (act.time || '').split('-').map(x => x.trim()); const set = (ns: string, ne: string) => updateActivity(act.id, 'time', ns || ne ? `${ns} - ${ne}` : ''); return (
-                      <div className="grid grid-cols-2 gap-2">
-                        <input type="time" aria-label={`Activity ${index + 1} start time`} value={st} onChange={e => set(e.target.value, en)} className="w-full" />
-                        <input type="time" aria-label={`Activity ${index + 1} end time`} value={en} onChange={e => set(st, e.target.value)} className="w-full" />
-                      </div>); })()}
-                  </div>
-
-                  <div className="sm:col-span-6 lg:col-span-4">
-                    <label className="block text-xs font-semibold text-foreground  mb-1">
-                      Activity / Task Description *
-                    </label>
-                    <VoiceInput voiceLabel="activity description" value={act.activityTask} onValueChange={(v) => updateActivity(act.id, 'activityTask', v)}
-                      placeholder="e.g. Botanical formulation mix Batch #42"
-                      className="w-full px-3 py-2 text-xs rounded-lg border border-border  bg-card  text-foreground "
-                      required
-                    />
-                  </div>
-
-                  <div className="sm:col-span-4">
-                    <label className="block text-xs font-semibold text-foreground  mb-1">
-                      Place / Person / Platform
-                    </label>
-                    <VoiceInput voiceLabel="place, person or platform" value={act.placePersonPlatform} onValueChange={(v) => updateActivity(act.id, 'placePersonPlatform', v)}
-                      placeholder="e.g. Extraction Lab / Marcus Chen"
-                      className="w-full px-3 py-2 text-xs rounded-lg border border-border  bg-card  text-foreground "
-                    />
-                  </div>
-
-                  <div className="sm:col-span-4">
-                    <label className="block text-xs font-semibold text-foreground  mb-1">
-                      Quantity / Figures
-                    </label>
-                    <VoiceInput voiceLabel="quantity or figures" value={act.quantityFigures} onValueChange={(v) => updateActivity(act.id, 'quantityFigures', v)}
-                      placeholder="e.g. 50 liters, 120 units"
-                      className="w-full px-3 py-2 text-xs rounded-lg border border-border  bg-card  text-foreground "
-                    />
-                  </div>
-
-                  <div className="sm:col-span-8">
-                    <label className="block text-xs font-semibold text-foreground  mb-1">
-                      Outcome / Deliverable
-                    </label>
-                    <VoiceInput voiceLabel="outcome" value={act.outcome} onValueChange={(v) => updateActivity(act.id, 'outcome', v)}
-                      placeholder="e.g. Passed specific gravity quality test"
-                      className="w-full px-3 py-2 text-xs rounded-lg border border-border  bg-card  text-foreground "
-                    />
-                  </div>
-                </div>
-
-                {activities.length > 1 && (
-                  <Button variant="legacy"
-                    type="button"
-                    onClick={() => removeActivity(act.id)}
-                    className="p-1.5 text-muted-foreground hover:text-destructive transition-colors"
-                    title="Remove activity"
-                  >
-                    <Trash2 className="w-4 h-4" />
-                  </Button>
-                )}
-              </div>
-            </div>
-          ))}
-        </div>
-      </div>
-
-      {/* SECTION 4: CHALLENGES OR INCIDENTS */}
-      <div id="report-step-3" className="bg-card p-5 sm:p-7 rounded-xl border border-border shadow-[var(--shadow-soft)] space-y-5 fade-up">
-        <div className="flex items-center justify-between border-b border-border  pb-3">
-          <div>
-            <span className="text-xs font-bold uppercase tracking-normal text-primary">Section 4</span>
-            <h2 className="text-base font-bold text-foreground ">
-              Challenges or Incidents (Optional)
-            </h2>
-            <p className="text-xs text-muted-foreground ">
-              Document problems encountered, field incidents, machine breakdowns, or delays.
-            </p>
-          </div>
-          <Button variant="legacy"
-            type="button"
-            onClick={addChallenge}
-            className="flex items-center gap-1 px-3 py-1.5 text-xs font-semibold text-primary  hover:bg-brand-wash  rounded-lg border border-primary/40 transition-colors"
-          >
-            <Plus className="w-3.5 h-3.5" />
-            <span>Add Incident / Challenge</span>
-          </Button>
-        </div>
-
-        {challenges.length === 0 ? (
-          <div className="p-4 rounded-lg bg-muted  text-xs text-muted-foreground text-center">
-            No incidents or challenges logged for today. Click "Add Incident / Challenge" if problems occurred.
-          </div>
-        ) : (
-          <div className="space-y-4">
-            {challenges.map((ch, index) => (
-              <div key={ch.id} className="p-4 rounded-lg border border-border  bg-muted/50  space-y-3">
-                <div className="flex items-start justify-between gap-3">
-                  <span className="text-xs font-bold text-muted-foreground mt-2">
-                    #{index + 1}
-                  </span>
-                  <div className="flex-1 space-y-2">
-                    <div className="grid grid-cols-1 sm:grid-cols-12 gap-3">
-                      <div className="sm:col-span-8">
-                        <label className="block text-xs font-semibold text-foreground  mb-1">
-                          Problem Encountered
-                        </label>
-                        <VoiceInput voiceLabel="problem encountered" value={ch.problemEncountered} onValueChange={(v) => updateChallenge(ch.id, 'problemEncountered', v)}
-                          placeholder="e.g. Sudden generator power dip paused distillation rig"
-                          className="w-full px-3 py-2 text-xs rounded-lg border border-border  bg-card  text-foreground "
-                        />
-                      </div>
-                      <div className="sm:col-span-4">
-                        <label className="block text-xs font-semibold text-foreground  mb-1">
-                          When It Happened
-                        </label>
-                        <VoiceInput voiceLabel="when it happened" value={ch.whenHappened} onValueChange={(v) => updateChallenge(ch.id, 'whenHappened', v)}
-                          placeholder="e.g. 14:15 during second boil"
-                          className="w-full px-3 py-2 text-xs rounded-lg border border-border  bg-card  text-foreground "
-                        />
-                      </div>
-                    </div>
-
-                    <div className="grid grid-cols-1 sm:grid-cols-12 gap-3 items-center">
-                      <div className="sm:col-span-8">
-                        <label className="block text-xs font-semibold text-foreground  mb-1">
-                          Action Taken
-                        </label>
-                        <VoiceInput voiceLabel="action taken" value={ch.actionTaken} onValueChange={(v) => updateChallenge(ch.id, 'actionTaken', v)}
-                          placeholder="e.g. Switched to backup inverter and secured pressure valves"
-                          className="w-full px-3 py-2 text-xs rounded-lg border border-border  bg-card  text-foreground "
-                        />
-                      </div>
-                      <div className="sm:col-span-4 pt-4">
-                        <label className="flex items-center gap-2 cursor-pointer text-xs font-semibold text-foreground ">
-                          <input
-                            type="checkbox"
-                            checked={ch.resolved}
-                            onChange={(e) => updateChallenge(ch.id, 'resolved', e.target.checked)}
-                            className="rounded border-border text-primary focus:ring-primary"
-                          />
-                          <span>Challenge was resolved</span>
-                        </label>
-                      </div>
-                    </div>
-                  </div>
-
-                  <Button variant="legacy"
-                    type="button"
-                    onClick={() => removeChallenge(ch.id)}
-                    className="p-1.5 text-muted-foreground hover:text-destructive transition-colors"
-                  >
-                    <Trash2 className="w-4 h-4" />
-                  </Button>
-                </div>
-              </div>
-            ))}
-          </div>
-        )}
-      </div>
-
-      {/* SECTION 5: PLAN / NEEDS FOR TOMORROW */}
-      <div id="report-step-4" className="bg-card p-5 sm:p-7 rounded-xl border border-border shadow-[var(--shadow-soft)] space-y-5 fade-up">
-        <div className="flex items-center justify-between border-b border-border  pb-3">
-          <div>
-            <span className="text-xs font-bold uppercase tracking-normal text-primary">Section 5</span>
-            <h2 className="text-base font-bold text-foreground ">
-              Plan / Needs for Tomorrow
-            </h2>
-            <p className="text-xs text-muted-foreground ">
-              Advance planning helps supervisors allocate tools, materials, and approvals.
-            </p>
-          </div>
-          <Button variant="legacy"
-            type="button"
-            onClick={addTomorrowPlan}
-            className="flex items-center gap-1 px-3 py-1.5 text-xs font-semibold text-primary  hover:bg-brand-wash  rounded-lg border border-primary/40 transition-colors"
-          >
-            <Plus className="w-3.5 h-3.5" />
-            <span>Add Plan Item</span>
-          </Button>
-        </div>
-
-        <div className="space-y-4">
-          {tomorrowPlans.map((plan, index) => (
-            <div key={plan.id} className="p-4 rounded-lg border border-border  bg-muted/50  space-y-3">
-              <div className="flex items-start justify-between gap-3">
-                <span className="text-xs font-bold text-muted-foreground mt-2">
-                  #{index + 1}
-                </span>
-                <div className="flex-1 grid grid-cols-1 sm:grid-cols-12 gap-3">
-                  <div className="sm:col-span-5">
-                    <label className="block text-xs font-semibold text-foreground  mb-1">
-                      Planned Task
-                    </label>
-                    <VoiceInput voiceLabel="planned task" value={plan.plannedTask} onValueChange={(v) => updateTomorrowPlan(plan.id, 'plannedTask', v)}
-                      placeholder="e.g. Bottle 100 units of eucalyptus oil"
-                      className="w-full px-3 py-2 text-xs rounded-lg border border-border  bg-card  text-foreground "
-                    />
-                  </div>
-
-                  <div className="sm:col-span-4">
-                    <label className="block text-xs font-semibold text-foreground  mb-1">
-                      Resources Needed
-                    </label>
-                    <VoiceInput voiceLabel="resources needed" value={plan.resourcesNeeded} onValueChange={(v) => updateTomorrowPlan(plan.id, 'resourcesNeeded', v)}
-                      placeholder="e.g. 100 amber bottles, tamper seals"
-                      className="w-full px-3 py-2 text-xs rounded-lg border border-border  bg-card  text-foreground "
-                    />
-                  </div>
-
-                  <div className="sm:col-span-3">
-                    <label className="block text-xs font-semibold text-foreground  mb-1">
-                      Approvals Required
-                    </label>
-                    <VoiceInput voiceLabel="approvals required" value={plan.approvalsRequired} onValueChange={(v) => updateTomorrowPlan(plan.id, 'approvalsRequired', v)}
-                      placeholder="e.g. Sarah Jenkins sign-off"
-                      className="w-full px-3 py-2 text-xs rounded-lg border border-border  bg-card  text-foreground "
-                    />
-                  </div>
-                </div>
-
-                {tomorrowPlans.length > 1 && (
-                  <Button variant="legacy"
-                    type="button"
-                    onClick={() => removeTomorrowPlan(plan.id)}
-                    className="p-1.5 text-muted-foreground hover:text-destructive transition-colors"
-                  >
-                    <Trash2 className="w-4 h-4" />
-                  </Button>
-                )}
-              </div>
-            </div>
-          ))}
-        </div>
-      </div>
-
-      {/* SECTION 6: SUPPORTING EVIDENCE */}
-      <div id="report-step-5" className="bg-card p-5 sm:p-7 rounded-xl border border-border shadow-[var(--shadow-soft)] space-y-5 fade-up">
-        <div className="border-b border-border  pb-3">
-          <span className="text-xs font-bold uppercase tracking-normal text-primary">Section 6</span>
-          <h2 className="text-base font-bold text-foreground ">
-            Supporting Evidence & Attachments
-          </h2>
-          <p className="text-xs text-muted-foreground ">
-            Upload photographs, test logs, receipts, or field survey notes. 
-          </p>
-        </div>
-
-        <div>
-          <label className="flex flex-col items-center justify-center border-2 border-dashed border-border  hover:border-primary rounded-lg p-6 cursor-pointer bg-muted/50  transition-colors">
-            <Upload className="w-7 h-7 text-muted-foreground mb-2" />
-            <span className="text-xs font-semibold text-foreground ">
-              Click to select evidence files (Images, PDFs, Documents)
-            </span>
-            <span className="text-[11px] text-muted-foreground mt-1">
-              Max 10MB per file · Evidence attachments
-            </span>
-            <input
-              type="file"
-              multiple
-              accept="image/*,application/pdf,text/*"
-              onChange={handleFileUpload}
-              className="hidden"
-            />
-          </label>
-        </div>
-
-        {attachments.length > 0 && (
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3 pt-2">
-            {attachments.map(att => (
-              <div
-                key={att.id}
-                className="p-3 rounded-lg border border-border  bg-muted  flex items-center justify-between gap-2"
-              >
-                <div className="flex items-center gap-2.5 min-w-0">
-                  <Paperclip className="w-4 h-4 text-muted-foreground shrink-0" />
-                  <div className="min-w-0">
-                    <div className="text-xs font-medium text-foreground  truncate">
-                      {att.name}
-                    </div>
-                    <div className="text-[10px] text-muted-foreground">
-                      {(att.size / 1024).toFixed(1)} KB · {att.type.split('/')[1]?.toUpperCase() || 'FILE'}
-                    </div>
-                  </div>
-                </div>
-                <Button variant="legacy"
-                  type="button"
-                  onClick={() => removeAttachment(att.id)}
-                  className="p-1 text-muted-foreground hover:text-destructive transition-colors shrink-0"
-                  title="Remove attachment"
-                >
-                  <X className="w-4 h-4" />
-                </Button>
-              </div>
-            ))}
-          </div>
-        )}
-      </div>
-
-      {/* Bottom Final Actions */}
-      <div className="report-submit-actions flex flex-wrap items-center justify-between gap-3 p-3 sm:p-4 bg-card/95 rounded-xl border border-border shadow-[var(--shadow-soft)]">
-        <div><span className="text-xs text-muted-foreground">Review each section above, then save or submit.</span></div>
-        <div className="flex items-center gap-3">
-          <Button variant="legacy"
-            type="button"
-            onClick={handleSaveDraft}
-            disabled={isSaving}
-            className="px-4 py-2 border border-border  text-foreground  text-xs font-semibold rounded-lg hover:bg-muted "
-          >
-            Save Draft
-          </Button>
-          <Button variant="legacy"
-            type="button"
-            onClick={() => {
-              if (validate()) {
-                setShowSubmitConfirm(true);
-              } else { setStep(6); }
-            }}
-            disabled={isSaving}
-            className="px-5 py-2 bg-primary hover:bg-primary text-primary-foreground text-xs font-semibold rounded-lg shadow-sm"
-          >
-            {isReturned ? 'Resubmit Report' : 'Submit Daily Report'}
-          </Button>
-        </div>
-      </div>
-
-      </div>}
-
-      {/* Pre-Submit Confirmation Modal */}
+      {/* Pre-submit confirmation */}
       {showSubmitConfirm && (
-        <div className="fixed inset-0 z-50 bg-overlay/60 flex items-center justify-center p-4 backdrop-blur-xs">
-          <div className="bg-card  rounded-lg shadow-2xl max-w-md w-full border border-border  p-6 space-y-4">
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-overlay/60 p-4 backdrop-blur-xs" role="dialog" aria-modal="true" aria-labelledby="submit-confirm-title">
+          <div className="w-full max-w-md space-y-4 rounded-xl border border-border bg-card p-6 shadow-2xl">
             <div className="flex items-center gap-3">
-              <div className="w-10 h-10 rounded-full bg-success-soft  flex items-center justify-center text-primary">
-                <FileCheck className="w-5 h-5" />
-              </div>
+              <div className="grid size-10 place-items-center rounded-full bg-success-soft text-success"><FileCheck className="size-5" aria-hidden="true" /></div>
               <div>
-                <h3 className="font-bold text-foreground  text-base">
-                  Confirm Daily Report Submission
-                </h3>
-                <p className="text-xs text-muted-foreground">
-                  {date} · {dayOfWeekName}
-                </p>
+                <h3 id="submit-confirm-title" className="text-base font-bold text-foreground">Submit your daily report?</h3>
+                <p className="text-sm text-muted-foreground">{dayOfWeekName}, {date}</p>
               </div>
             </div>
-
-            <p className="text-xs text-muted-foreground  leading-relaxed">
-              Once submitted, this daily report will be locked for review by {submittedToName}. You will receive a notification when the review is completed.
-            </p>
-
-            <div className="bg-muted  p-3 rounded-lg text-xs space-y-1.5 border border-border  font-medium">
-              <div className="flex justify-between">
-                <span className="text-muted-foreground">Objectives Logged:</span>
-                <span className="text-foreground  font-bold">{objectives.length}</span>
-              </div>
-              <div className="flex justify-between">
-                <span className="text-muted-foreground">Activities Logged:</span>
-                <span className="text-foreground  font-bold">{activities.length}</span>
-              </div>
-              <div className="flex justify-between">
-                <span className="text-muted-foreground">Evidence Files:</span>
-                <span className="text-foreground  font-bold">{attachments.length}</span>
-              </div>
-            </div>
-
-            <div className="flex items-center justify-end gap-3 pt-2">
-              <Button variant="legacy"
-                type="button"
-                onClick={() => setShowSubmitConfirm(false)}
-                className="px-4 py-2 text-xs font-semibold text-muted-foreground  hover:bg-muted  rounded-lg"
-              >
-                Back to Editing
-              </Button>
-              <Button variant="legacy"
-                type="button"
-                onClick={handleConfirmSubmit}
-                disabled={isSaving}
-                className="px-5 py-2 text-xs font-semibold text-primary-foreground bg-primary hover:bg-primary rounded-lg shadow-sm"
-              >
-                {isSaving ? 'Submitting...' : 'Yes, Submit Report'}
-              </Button>
+            <p className="text-sm leading-relaxed text-muted-foreground">Once submitted, this report is locked for review by {submittedToName}. You will get a notification when it has been reviewed.</p>
+            <dl className="space-y-1.5 rounded-lg border border-border bg-muted p-3 text-sm">
+              <div className="flex justify-between"><dt className="text-muted-foreground">Objectives</dt><dd className="font-bold text-foreground">{filledObjectives.length}</dd></div>
+              <div className="flex justify-between"><dt className="text-muted-foreground">Activities</dt><dd className="font-bold text-foreground">{activities.filter((a) => a.activityTask.trim()).length}</dd></div>
+              <div className="flex justify-between"><dt className="text-muted-foreground">Challenges</dt><dd className="font-bold text-foreground">{challenges.filter((c) => c.problemEncountered.trim()).length}</dd></div>
+              <div className="flex justify-between"><dt className="text-muted-foreground">Plans for tomorrow</dt><dd className="font-bold text-foreground">{tomorrowPlans.filter((p) => p.plannedTask.trim()).length}</dd></div>
+            </dl>
+            <div className="flex flex-col-reverse gap-2 pt-1 sm:flex-row sm:justify-end">
+              <button type="button" onClick={() => setShowSubmitConfirm(false)} className="pp-btn pp-btn-outline">Go back and edit</button>
+              <button type="button" onClick={handleConfirmSubmit} disabled={isSaving} className="pp-btn pp-btn-primary">{isSaving ? 'Submitting…' : 'Yes, submit report'}</button>
             </div>
           </div>
         </div>
       )}
-
-
     </div>
   );
 };
