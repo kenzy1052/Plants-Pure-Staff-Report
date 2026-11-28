@@ -1,4 +1,6 @@
+import type * as React from "react";
 import { forwardRef, useCallback, useEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { X } from "lucide-react";
 import { cn } from "@/lib/utils";
 import kenzyImage from "@/assets/kenzy.webp";
@@ -32,6 +34,9 @@ interface KenzyFloatingProps {
  * The small floating mascot (bottom-right) with its short greeting. The greeting appears a moment after the
  * form opens, fades away by itself, can be dismissed, and comes back when the employee hovers or focuses
  * Kenzy. The mascot and the greeting both open the chat.
+ *
+ * It is rendered into document.body, so it is always an overlay pinned to the corner of the screen
+ * (never part of the form's layout) and no parent element can push it off-screen on a phone.
  */
 export const KenzyFloating = forwardRef<HTMLButtonElement, KenzyFloatingProps>(function KenzyFloating({ onOpen, liftOnMobile = false }, ref) {
   const [bubble, setBubble] = useState(false);
@@ -50,8 +55,27 @@ export const KenzyFloating = forwardRef<HTMLButtonElement, KenzyFloatingProps>(f
 
   const hide = () => { window.clearTimeout(timer.current); setBubble(false); };
 
-  return (
-    <div className={cn("kenzy-dock", liftOnMobile && "kenzy-dock-lift")}>
+  // Keep the mascot just above the sticky action bar, whatever height that bar has (its text can wrap on small phones).
+  const [lift, setLift] = useState<number | null>(null);
+  useEffect(() => {
+    if (!liftOnMobile || typeof ResizeObserver === "undefined") return;
+    const bar = document.querySelector<HTMLElement>(".pp-action-bar");
+    if (!bar) return;
+    const measure = () => {
+      const sticky = window.getComputedStyle(bar).position === "sticky";
+      setLift(sticky ? Math.ceil(bar.offsetHeight) + 12 : null);
+    };
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(bar);
+    window.addEventListener("resize", measure);
+    return () => { observer.disconnect(); window.removeEventListener("resize", measure); };
+  }, [liftOnMobile]);
+
+  if (typeof document === "undefined") return null;
+
+  return createPortal(
+    <div className={cn("kenzy-dock", liftOnMobile && "kenzy-dock-lift")} style={lift === null ? undefined : ({ "--kenzy-lift": `${lift}px` } as React.CSSProperties)}>
       {bubble && (
         <div className="kenzy-bubble" role="status">
           <button type="button" onClick={() => { hide(); onOpen(); }} className="kenzy-bubble-text">{KENZY_GREETING}</button>
@@ -71,6 +95,7 @@ export const KenzyFloating = forwardRef<HTMLButtonElement, KenzyFloatingProps>(f
       >
         <img src={kenzyImage} alt="" draggable={false} />
       </button>
-    </div>
+    </div>,
+    document.body,
   );
 });

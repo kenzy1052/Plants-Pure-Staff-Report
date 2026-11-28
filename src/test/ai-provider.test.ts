@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { AllProvidersFailedError, callWithFallback, callWithFallbackDetailed, isRecoverableStatus, ProviderError, providerOrderFrom, redactSecrets } from "@/services/providerFallback";
+import { AllProvidersFailedError, callWithFallback, callWithFallbackDetailed, callWithProviderChain, isRecoverableStatus, ProviderError, providerChainFrom, providerOrderFrom, redactSecrets } from "@/services/providerFallback";
 
 const quiet = () => undefined;
 
@@ -72,5 +72,57 @@ describe("AI provider policy", () => {
   it("redacts API keys and bearer tokens", () => {
     expect(redactSecrets("url?key=SECRETVALUE123&x=1")).toBe("url?key=[redacted]&x=1");
     expect(redactSecrets("token super-secret-value-123 leaked", ["super-secret-value-123"])).toBe("token [redacted] leaked");
+  });
+});
+
+describe("Provider chain (Gemini, Groq, DeepSeek)", () => {
+  it("lists configured providers first, then the rest in the default order", () => {
+    expect(providerChainFrom("report", undefined)).toEqual(["gemini", "groq", "deepseek"]);
+    expect(providerChainFrom("report", "deepseek")).toEqual(["deepseek", "gemini", "groq"]);
+    expect(providerChainFrom("report", "groq, deepseek ,GEMINI")).toEqual(["groq", "deepseek", "gemini"]);
+    expect(providerChainFrom("report", "nonsense,gemini,gemini")).toEqual(["gemini", "groq", "deepseek"]);
+  });
+
+  it("never offers DeepSeek for transcription (it has no speech API)", () => {
+    expect(providerChainFrom("transcription", undefined)).toEqual(["groq", "gemini"]);
+    expect(providerChainFrom("transcription", "deepseek,gemini")).toEqual(["gemini", "groq"]);
+  });
+
+  it("falls through Gemini and Groq to DeepSeek and says it fell back", async () => {
+    const calls: string[] = [];
+    const outcome = await callWithProviderChain("report", ["gemini", "groq", "deepseek"], async (provider) => {
+      calls.push(provider);
+      if (provider === "gemini") throw new ProviderError("gemini report structuring failed: Your prepayment credits are depleted.", "gemini", 402, false);
+      if (provider === "groq") throw new ProviderError("The model `llama-3.3-70b-versatile` does not exist or you do not have access to it.", "groq", 404, false);
+      return "deepseek draft";
+    }, quiet);
+    expect(calls).toEqual(["gemini", "groq", "deepseek"]);
+    expect(outcome).toMatchObject({ value: "deepseek draft", provider: "deepseek", fellBack: true });
+    expect(outcome.primaryFailure).toMatch(/prepayment credits/);
+  });
+
+  it("stops at the first provider that works", async () => {
+    const calls: string[] = [];
+    const outcome = await callWithProviderChain("report", ["gemini", "groq", "deepseek"], async (provider) => {
+      calls.push(provider);
+      if (provider === "gemini") throw new Error("down");
+      return "groq draft";
+    }, quiet);
+    expect(calls).toEqual(["gemini", "groq"]);
+    expect(outcome.provider).toBe("groq");
+  });
+
+  it("reports every attempt when all providers fail, and an empty chain explains what to configure", async () => {
+    const failing = await callWithProviderChain("report", ["gemini", "groq", "deepseek"], async (provider) => { throw new ProviderError(`${provider} down`, provider, 503, true); }, quiet).catch((e: unknown) => e);
+    expect(failing instanceof AllProvidersFailedError).toBe(true);
+    expect((failing as AllProvidersFailedError).attempts.map((a) => a.provider)).toEqual(["gemini", "groq", "deepseek"]);
+    const empty = await callWithProviderChain("report", [], async () => "never", quiet).catch((e: unknown) => e);
+    expect(empty instanceof AllProvidersFailedError).toBe(true);
+    expect((empty as AllProvidersFailedError).message).toMatch(/GEMINI_API_KEY/);
+  });
+
+  it("redacts the newer Gemini (AQ.) and DeepSeek (sk-) key shapes", () => {
+    const text = redactSecrets("bad key AQ.Ab8RN6KX2kOpB3ZmfPWB4Km6Ub0QoB1BIa9uFo and sk-0123456789abcdef0123456789abcdef");
+    expect(text).not.toMatch(/AQ\.Ab8|sk-0123/);
   });
 });

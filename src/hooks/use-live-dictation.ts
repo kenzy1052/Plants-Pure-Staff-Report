@@ -285,7 +285,7 @@ export function useLiveDictation({ onConfirmed, onError, onNote }: UseLiveDictat
           return;
         }
         const message = error instanceof Error ? error.message : "";
-        giveUp(message && !/timeout|empty|fetch|network|server|Both AI providers/i.test(message) ? message : "I could not turn that recording into text. You can try again or type instead.");
+        giveUp(message && !/timeout|empty|fetch|network|server|AI providers/i.test(message) ? message : "I could not turn that recording into text. You can try again or type instead.");
         return;
       }
     }

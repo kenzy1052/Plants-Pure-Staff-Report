@@ -201,7 +201,7 @@ export function useVoiceCapture({ onTranscript, onError, onProviderNote }: UseVo
             handlers.current.onTranscript(result.text);
           } catch (error) {
             const message = error instanceof Error ? error.message : "";
-            fail(/Both AI providers/i.test(message) ? "Speech transcription is unavailable right now. You can keep typing." : message && !/fetch|network|server/i.test(message) ? message : "Speech transcription could not be completed. You can keep typing.");
+            fail(/AI providers/i.test(message) ? "Speech transcription is unavailable right now. You can keep typing." : message && !/fetch|network|server/i.test(message) ? message : "Speech transcription could not be completed. You can keep typing.");
           } finally {
             safeSet("idle");
           }

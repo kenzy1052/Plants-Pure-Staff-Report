@@ -4,7 +4,7 @@ import { z } from 'zod';
 import type { Json } from '@/integrations/supabase/types';
 import type { StructuredNarrationDraft } from '@/types';
 import { MAX_NARRATION_LENGTH, normalizeActivityTime } from '@/services/narrationParser';
-import { AllProvidersFailedError, ProviderError, callWithFallback, callWithFallbackDetailed, isRecoverableStatus, providerOrderFrom, type ProviderName } from '@/services/providerFallback';
+import { AllProvidersFailedError, ProviderError, callWithFallback, callWithProviderChain, isRecoverableStatus, providerChainFrom, type ProviderName } from '@/services/providerFallback';
 
 // Re-exported so existing imports/tests keep working.
 export { AllProvidersFailedError, ProviderError, callWithFallback, isRecoverableStatus };
@@ -62,23 +62,48 @@ function groqBaseUrl(): string {
   return (process.env['GROQ_API_URL'] || 'https://api.groq.com/openai/v1').replace(/\/+$/, '');
 }
 
+function deepseekBaseUrl(): string {
+  return (process.env['DEEPSEEK_API_URL'] || 'https://api.deepseek.com').replace(/\/+$/, '');
+}
+
+// Model defaults. Every one can be overridden with the matching environment variable, so a model
+// being retired never needs a code change. (Checked Nov 2026: gemini-3.1-flash-lite is stable, on
+// Google's free tier and accepts audio; Groq retired llama-3.3-70b-versatile on 16 Aug 2026; DeepSeek's
+// current fast model is deepseek-flash, the old deepseek-chat id is gone.)
+const DEFAULT_GEMINI_MODEL = 'gemini-3.1-flash-lite';
+const DEFAULT_GROQ_REPORT_MODEL = 'openai/gpt-oss-120b';
+const DEFAULT_GROQ_TRANSCRIPTION_MODEL = 'whisper-large-v3-turbo';
+const DEFAULT_DEEPSEEK_MODEL = 'deepseek-flash';
+
+/** True when the provider has an API key on the server, so the chain can skip providers you have not set up. */
+function providerConfigured(name: ProviderName): boolean {
+  const key = name === 'gemini' ? 'GEMINI_API_KEY' : name === 'groq' ? 'GROQ_API_KEY' : 'DEEPSEEK_API_KEY';
+  return Boolean(process.env[key]?.trim());
+}
+
 function providerConfig(name: ProviderName, purpose: 'report' | 'transcription'): ProviderConfig {
   if (name === 'gemini') {
-    const apiKey = process.env['GEMINI_API_KEY'];
+    const apiKey = process.env['GEMINI_API_KEY']?.trim();
     if (!apiKey) throw new ProviderError('Gemini is not configured. Add GEMINI_API_KEY on the server.', 'gemini');
     return {
       name,
       apiKey,
-      model: purpose === 'report' ? (process.env['REPORT_AI_MODEL'] || 'gemini-3.8-flash') : (process.env['GEMINI_TRANSCRIPTION_MODEL'] || 'gemini-3.5-transcribe'),
+      model: purpose === 'report' ? (process.env['REPORT_AI_MODEL'] || DEFAULT_GEMINI_MODEL) : (process.env['GEMINI_TRANSCRIPTION_MODEL'] || DEFAULT_GEMINI_MODEL),
     };
   }
-  const apiKey = process.env['GROQ_API_KEY'];
+  if (name === 'deepseek') {
+    const apiKey = process.env['DEEPSEEK_API_KEY']?.trim();
+    if (!apiKey) throw new ProviderError('DeepSeek is not configured. Add DEEPSEEK_API_KEY on the server.', 'deepseek');
+    if (purpose === 'transcription') throw new ProviderError('DeepSeek does not offer speech transcription.', 'deepseek');
+    return { name, apiKey, baseUrl: deepseekBaseUrl(), model: process.env['DEEPSEEK_REPORT_MODEL'] || DEFAULT_DEEPSEEK_MODEL };
+  }
+  const apiKey = process.env['GROQ_API_KEY']?.trim();
   if (!apiKey) throw new ProviderError('Groq is not configured. Add GROQ_API_KEY on the server.', 'groq');
   return {
     name,
     apiKey,
     baseUrl: groqBaseUrl(),
-    model: purpose === 'report' ? (process.env['GROQ_REPORT_MODEL'] || 'llama-3.3-70b-versatile') : (process.env['REPORT_TRANSCRIPTION_MODEL'] || 'whisper-large-v3-turbo'),
+    model: purpose === 'report' ? (process.env['GROQ_REPORT_MODEL'] || DEFAULT_GROQ_REPORT_MODEL) : (process.env['REPORT_TRANSCRIPTION_MODEL'] || DEFAULT_GROQ_TRANSCRIPTION_MODEL),
   };
 }
 
@@ -197,9 +222,10 @@ function userPrompt(narration: string, knownActivities: string[], currentReport:
   return `Known activity wording from this employee's past reports is vocabulary context only and is NOT evidence they did these today: ${knownActivities.join('; ') || 'none'}\n\nCurrent report rows (JSON):\n${JSON.stringify(currentReport ?? {})}\n\nEmployee's new message:\n${narration}`;
 }
 
-type NarrationInput = z.infer<typeof narrationInputSchema>;
+export type NarrationInput = z.infer<typeof narrationInputSchema>;
 
-async function callGeminiReport(input: NarrationInput) {
+/** Exported for tests only. */
+export async function callGeminiReport(input: NarrationInput) {
   const config = providerConfig('gemini', 'report');
   const response = await fetchWithTimeout(`https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(config.model)}:generateContent`, {
     method: 'POST',
@@ -216,7 +242,8 @@ async function callGeminiReport(input: NarrationInput) {
   return parseReportOutput(content, 'gemini');
 }
 
-async function callGroqReport(input: NarrationInput) {
+/** Exported for tests only. */
+export async function callGroqReport(input: NarrationInput) {
   const config = providerConfig('groq', 'report');
   const schemaText = JSON.stringify(reportSchema({ strict: false }));
   const messages = [
@@ -243,6 +270,26 @@ async function callGroqReport(input: NarrationInput) {
   const content = payload.choices?.[0]?.message?.content;
   if (!content) throw new ProviderError('Groq returned no report draft.', 'groq', undefined, false);
   return parseReportOutput(content, 'groq');
+}
+
+/** Exported for tests only. DeepSeek is OpenAI-compatible but only supports `json_object` (not `json_schema`), so the schema is given in the prompt. */
+export async function callDeepseekReport(input: NarrationInput) {
+  const config = providerConfig('deepseek', 'report');
+  const schemaText = JSON.stringify(reportSchema({ strict: false }));
+  const messages = [
+    { role: 'system', content: `${narrationSystem(input.department)}\n\nReturn JSON only. The JSON must follow this schema:\n${schemaText}` },
+    { role: 'user', content: userPrompt(input.narration, input.knownActivities, input.currentReport) },
+  ];
+  const response = await fetchWithTimeout(`${config.baseUrl}/chat/completions`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${config.apiKey}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ model: config.model, temperature: 0, max_tokens: 4096, messages, response_format: { type: 'json_object' } }),
+  }, 'deepseek', 45_000);
+  const payload = await readProviderJson(response, 'deepseek', 'report structuring') as { choices?: { message?: { content?: string } }[] };
+  const content = payload.choices?.[0]?.message?.content;
+  // DeepSeek's JSON mode can occasionally return an empty body; treat that as a failed attempt so the chain moves on.
+  if (!content?.trim()) throw new ProviderError('DeepSeek returned no report draft.', 'deepseek', undefined, false);
+  return parseReportOutput(content, 'deepseek');
 }
 
 function parseReportOutput(content: string, provider: ProviderName) {
@@ -278,6 +325,19 @@ export function toDraft(output: z.infer<typeof narrationOutputSchema>, input: { 
 
 function isEmptyDraft(draft: StructuredNarrationDraft) {
   return !draft.objectives.length && !draft.activities.length && !draft.challenges.length && !draft.tomorrowPlans.length && !draft.removeIds.length && !draft.clarification;
+}
+
+/**
+ * An empty answer is only a FAILED attempt when the report is still blank (a real narration must produce
+ * rows). When the report already has rows, an empty answer is legitimate: the model is told to return only
+ * what is new or changed, so repeating something already in the report correctly yields nothing. Rejecting
+ * that made every provider "fail" and silently switched the employee to the offline parser.
+ */
+export function shouldRejectEmptyDraft(draft: StructuredNarrationDraft, input: { narration: string; currentReport?: NarrationInput['currentReport'] }): boolean {
+  if (!isEmptyDraft(draft) || input.narration.trim().length < 15) return false;
+  const report = input.currentReport;
+  const existingRows = (report?.objectives?.length ?? 0) + (report?.activities?.length ?? 0) + (report?.challenges?.length ?? 0) + (report?.tomorrowPlans?.length ?? 0);
+  return existingRows === 0;
 }
 
 function parseJsonObject(content: string): unknown {
@@ -317,66 +377,43 @@ async function callGeminiTranscription(audioBase64: string, mimeType: string) {
   return text;
 }
 
-export function providerOrder(purpose: 'report' | 'transcription'): [ProviderName, ProviderName] {
-  return providerOrderFrom(purpose, purpose === 'report' ? process.env['REPORT_AI_PROVIDER'] : process.env['REPORT_TRANSCRIPTION_PROVIDER']);
+/**
+ * Providers to try, in order, for this purpose. REPORT_AI_PROVIDER / REPORT_TRANSCRIPTION_PROVIDER may be a
+ * single name ("gemini") or a list ("gemini,deepseek,groq"). Providers without an API key are skipped.
+ */
+export function providerChain(purpose: 'report' | 'transcription'): ProviderName[] {
+  const configured = purpose === 'report' ? process.env['REPORT_AI_PROVIDER'] : process.env['REPORT_TRANSCRIPTION_PROVIDER'];
+  return providerChainFrom(purpose, configured).filter(providerConfigured);
 }
 
-export const structureNarration = createServerFn({ method: 'POST' }).middleware([requireSupabaseAuth]).inputValidator((input: unknown) => narrationInputSchema.parse(input)).handler(async ({ data }) => {
-  const [primary, fallback] = providerOrder('report');
-  const outcome = await callWithFallbackDetailed('report', primary, fallback, async (provider) => {
-    const output = provider === 'gemini' ? await callGeminiReport(data) : await callGroqReport(data);
+const REPORT_CALLS: Record<ProviderName, (input: NarrationInput) => ReturnType<typeof callGeminiReport>> = {
+  gemini: callGeminiReport,
+  groq: callGroqReport,
+  deepseek: callDeepseekReport,
+};
+
+export const structureNarration = createServerFn({ method: 'POST' }).middleware([requireSupabaseAuth]).validator((input: unknown) => narrationInputSchema.parse(input)).handler(async ({ data }) => {
+  const outcome = await callWithProviderChain('report', providerChain('report'), async (provider) => {
+    const output = await REPORT_CALLS[provider](data);
     const draft = toDraft(output, data);
     // A provider that returns nothing usable for a real narration counts as a failed attempt.
-    if (isEmptyDraft(draft) && data.narration.trim().length >= 15) throw new ProviderError(`${provider} returned no usable report content.`, provider, undefined, false);
+    if (shouldRejectEmptyDraft(draft, data)) throw new ProviderError(`${provider} returned no usable report content.`, provider, undefined, false);
     return draft;
   });
   return { draft: outcome.value, provider: outcome.provider, fellBack: outcome.fellBack, primaryFailure: outcome.primaryFailure ?? '' };
 });
 
-export const transcribeAudio = createServerFn({ method: 'POST' }).middleware([requireSupabaseAuth]).inputValidator((input: unknown) => transcriptionInputSchema.parse(input)).handler(async ({ data }) => {
-  const [primary, fallback] = providerOrder('transcription');
-  const outcome = await callWithFallbackDetailed('transcription', primary, fallback, (provider) => provider === 'groq' ? callGroqTranscription(data.audioBase64, data.mimeType) : callGeminiTranscription(data.audioBase64, data.mimeType));
+export const transcribeAudio = createServerFn({ method: 'POST' }).middleware([requireSupabaseAuth]).validator((input: unknown) => transcriptionInputSchema.parse(input)).handler(async ({ data }) => {
+  const outcome = await callWithProviderChain('transcription', providerChain('transcription'), (provider) => provider === 'groq' ? callGroqTranscription(data.audioBase64, data.mimeType) : callGeminiTranscription(data.audioBase64, data.mimeType));
   return { text: outcome.value, provider: outcome.provider, fellBack: outcome.fellBack };
 });
 
-// ---------------------------------------------------------------------------
-// Fixed daily-report recipient (Madam Ursula)
-// ---------------------------------------------------------------------------
-export interface ReportRecipient { id: string; name: string }
-let recipientCache: { value: ReportRecipient; at: number } | null = null;
-const escapeLike = (value: string) => value.replace(/[\\%_]/g, (c) => `\\${c}`);
-
-/**
- * Resolves Madam Ursula's real staff profile. Order: REPORT_RECIPIENT_USER_ID (exact
- * profile id) -> active profile whose name matches REPORT_RECIPIENT_NAME (default
- * "Ursula"). Never guesses: zero or ambiguous matches throw a message that names
- * exactly what to fix.
- */
-export async function resolveReportRecipient(): Promise<ReportRecipient> {
-  if (recipientCache && Date.now() - recipientCache.at < 5 * 60_000) return recipientCache.value;
-  const { supabaseAdmin } = await import('@/integrations/supabase/client.server');
-  const pinnedId = process.env['REPORT_RECIPIENT_USER_ID']?.trim();
-  let found: ReportRecipient | null = null;
-  if (pinnedId) {
-    const { data, error } = await supabaseAdmin.from('profiles').select('id,name,email,active').eq('id', pinnedId).maybeSingle();
-    if (error) throw new Error(`Could not look up the report recipient: ${error.message}`);
-    if (!data || !data.active) throw new Error('REPORT_RECIPIENT_USER_ID does not match an active staff profile. Fix the id or remove the variable.');
-    found = { id: data.id, name: data.name || data.email };
-  } else {
-    const needle = (process.env['REPORT_RECIPIENT_NAME'] || 'Ursula').trim();
-    const { data, error } = await supabaseAdmin.from('profiles').select('id,name,email,active').eq('active', true).ilike('name', `%${escapeLike(needle)}%`);
-    if (error) throw new Error(`Could not look up the report recipient: ${error.message}`);
-    const rows = data ?? [];
-    if (rows.length === 0) throw new Error(`Madam Ursula's staff profile was not found (no active profile name contains "${needle}"). Create her staff account, or set REPORT_RECIPIENT_USER_ID on the server.`);
-    if (rows.length > 1) throw new Error(`More than one active profile matches "${needle}" (${rows.map((r) => r.name || r.email).join(', ')}). Set REPORT_RECIPIENT_USER_ID on the server to the correct profile id.`);
-    const row = rows[0]!;
-    found = { id: row.id, name: row.name || row.email };
-  }
-  recipientCache = { value: found, at: Date.now() };
-  return found;
-}
-
-export const getDailyReportRecipient = createServerFn({ method: 'POST' }).middleware([requireSupabaseAuth]).handler(async () => resolveReportRecipient());
+// Fixed daily-report recipient (Madam Ursula): the lookup lives in reportRecipient.server.ts so
+// the Supabase service-role client can never be pulled into the browser bundle.
+export const getDailyReportRecipient = createServerFn({ method: 'POST' }).middleware([requireSupabaseAuth]).handler(async () => {
+  const { resolveReportRecipient } = await import('@/services/reportRecipient.server');
+  return resolveReportRecipient();
+});
 
 export const getCloudUser = createServerFn({ method: 'POST' }).middleware([requireSupabaseAuth]).handler(async ({ context }) => {
   const [{ data: profile, error }, { data: role }] = await Promise.all([
@@ -392,7 +429,7 @@ export const getCloudUser = createServerFn({ method: 'POST' }).middleware([requi
   }
   return { id: profile.id, name: profile.name || profile.email, email: profile.email, role: role?.role ?? 'employee', employeeId: profile.employee_code, department: profile.department, roleTitle: profile.role_title, supervisorId: profile.supervisor_id ?? undefined, supervisorName };
 });
-export const readCloudStore = createServerFn({ method: 'POST' }).middleware([requireSupabaseAuth]).inputValidator((input: unknown) => z.object({ store: storeSchema }).parse(input)).handler(async ({ data, context }) => {
+export const readCloudStore = createServerFn({ method: 'POST' }).middleware([requireSupabaseAuth]).validator((input: unknown) => z.object({ store: storeSchema }).parse(input)).handler(async ({ data, context }) => {
   const rows: Json[] = [];
   for (let offset = 0; ; offset += 500) {
     const { data: records, error } = await context.supabase.from('reporting_records').select('payload').eq('store', data.store).order('id').range(offset,offset+499);
@@ -408,7 +445,7 @@ export const readCloudStore = createServerFn({ method: 'POST' }).middleware([req
   return rows;
 });
 const mutationSchema = z.object({ store:storeSchema, id:z.string().min(1), operation:z.enum(['put','delete']), payload:z.record(z.string(),z.unknown()).optional() });
-export const writeCloudRecord = createServerFn({ method:'POST' }).middleware([requireSupabaseAuth]).inputValidator((input:unknown)=>mutationSchema.parse(input)).handler(async ({data,context})=> {
+export const writeCloudRecord = createServerFn({ method:'POST' }).middleware([requireSupabaseAuth]).validator((input:unknown)=>mutationSchema.parse(input)).handler(async ({data,context})=> {
   const {data:roleRow,error:roleError}=await context.supabase.from('user_roles').select('role').eq('user_id',context.userId).single();
   const {data:profile}=await context.supabase.from('profiles').select('active,supervisor_id').eq('id',context.userId).single();
   if(roleError || !profile?.active) throw new Error('Staff access required.');
@@ -442,6 +479,7 @@ export const writeCloudRecord = createServerFn({ method:'POST' }).middleware([re
     supervisorId=old?.supervisor_id ?? ownerProfile?.supervisor_id ?? null;
     // Daily reports always go to the fixed recipient (Madam Ursula), whatever the client sent.
     if(data.store==='daily_reports' && data.operation==='put' && ownerId===context.userId) {
+      const { resolveReportRecipient } = await import('@/services/reportRecipient.server');
       const recipient=await resolveReportRecipient();
       if(recipient.id!==ownerId) { payload['submittedToId']=recipient.id; payload['submittedToName']=recipient.name; supervisorId=recipient.id; }
     }
@@ -472,13 +510,13 @@ export const writeCloudRecord = createServerFn({ method:'POST' }).middleware([re
   return {success:true};
 });
 const subscriptionSchema = z.object({ endpoint: z.string().url().startsWith('https://'), p256dh: z.string().min(10), auth: z.string().min(5) });
-export const savePushSubscription = createServerFn({ method:'POST' }).middleware([requireSupabaseAuth]).inputValidator((input:unknown)=>subscriptionSchema.parse(input)).handler(async ({ data, context }) => {
+export const savePushSubscription = createServerFn({ method:'POST' }).middleware([requireSupabaseAuth]).validator((input:unknown)=>subscriptionSchema.parse(input)).handler(async ({ data, context }) => {
   const { supabaseAdmin } = await import('@/integrations/supabase/client.server');
   const { error } = await (supabaseAdmin as any).from('push_subscriptions').upsert({ endpoint:data.endpoint, user_id:context.userId, p256dh:data.p256dh, auth:data.auth });
   if (error) throw new Error(error.message);
   return { success:true };
 });
-export const removePushSubscription = createServerFn({ method:'POST' }).middleware([requireSupabaseAuth]).inputValidator((input:unknown)=>z.object({ endpoint:z.string().min(10) }).parse(input)).handler(async ({ data, context }) => {
+export const removePushSubscription = createServerFn({ method:'POST' }).middleware([requireSupabaseAuth]).validator((input:unknown)=>z.object({ endpoint:z.string().min(10) }).parse(input)).handler(async ({ data, context }) => {
   const { supabaseAdmin } = await import('@/integrations/supabase/client.server');
   await (supabaseAdmin as any).from('push_subscriptions').delete().eq('endpoint', data.endpoint).eq('user_id', context.userId);
   return { success:true };

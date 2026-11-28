@@ -1,4 +1,5 @@
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
+import { createPortal } from "react-dom";
 import { Check, ClipboardCheck, Loader2, Mic, Pencil, RotateCcw, SendHorizontal, Trash2, Undo2, X } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useLiveDictation } from "@/hooks/use-live-dictation";
@@ -9,7 +10,8 @@ import { KenzyAvatar } from "./KenzyMascot";
 
 /**
  * Kenzy's chat. It lives in an overlay on top of the report form (full screen on phones, a floating
- * panel on larger screens). It stays mounted while closed, so the conversation, anything typed and the
+ * panel on larger screens), rendered into document.body so nothing in the form can affect its size or position.
+ * Messages are anchored to the bottom, next to the input, and every new message is added underneath the last one. It stays mounted while closed, so the conversation, anything typed and the
  * form underneath are exactly as the employee left them when the panel is reopened.
  *
  * Writing a report by voice has three separate stages, never merged into one tap:
@@ -63,7 +65,7 @@ const clock = (seconds: number) => `${Math.floor(seconds / 60)}:${String(seconds
 const isTouchOnly = () => typeof window !== "undefined" && typeof window.matchMedia === "function" && !window.matchMedia("(pointer: fine)").matches;
 
 export function DailyReportChat({ open, onClose, employeeName, department, recipientName, recipientError, getReport, knownActivities, onApplyDraft, undoDepth, onUndo, onReview }: DailyReportChatProps) {
-  const firstName = employeeName.trim().split(/\s+/)[0] ?? "";
+  const firstName = employeeName.trim().split(/\s+/).find((word) => !/^(dr|mr|mrs|ms|miss|prof|madam|sir|engr|eng)\.?$/i.test(word)) ?? "";
   const [text, setText] = useState("");
   const [busy, setBusy] = useState(false);
   const busyRef = useRef(false);
@@ -75,6 +77,7 @@ export function DailyReportChat({ open, onClose, employeeName, department, recip
   const [fullScreen, setFullScreen] = useState(false);
   const panelRef = useRef<HTMLDivElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
+  const threadRef = useRef<HTMLDivElement>(null);
   const liveRef = useRef<HTMLDivElement>(null);
   const areaRef = useRef<HTMLTextAreaElement>(null);
   const textRef = useRef(text);
@@ -113,7 +116,21 @@ export function DailyReportChat({ open, onClose, employeeName, department, recip
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, fullScreen]);
 
-  useEffect(() => { listRef.current?.scrollTo({ top: listRef.current.scrollHeight, behavior: "smooth" }); }, [messages, busy]);
+  // Always show the newest message. A very tall reply (a draft with many fields) is scrolled to its top instead,
+  // so the employee starts reading it from the first line.
+  const scrollToNewest = (smooth: boolean) => {
+    const list = listRef.current;
+    const last = threadRef.current?.lastElementChild as HTMLElement | null | undefined;
+    if (!list) return;
+    const behavior: ScrollBehavior = smooth ? "smooth" : "auto";
+    if (last && last.offsetHeight > list.clientHeight * 0.8 && last.dataset["role"] === "assistant") {
+      list.scrollTo({ top: Math.max(0, last.offsetTop - 12), behavior });
+    } else {
+      list.scrollTo({ top: list.scrollHeight, behavior });
+    }
+  };
+  useEffect(() => { if (open) scrollToNewest(true); }, [messages, busy]);
+  useLayoutEffect(() => { if (open) scrollToNewest(false); }, [open]);
   useEffect(() => {
     const el = areaRef.current;
     if (!el) return;
@@ -224,7 +241,9 @@ export function DailyReportChat({ open, onClose, employeeName, department, recip
   const statusLabel = { listening: "Listening…", writing: "Writing out your words…", thinking: "Thinking…", ready: "Your Daily Reporting Assistant" }[state];
   const touchOnly = isTouchOnly();
 
-  return (
+  if (typeof document === "undefined") return null;
+
+  return createPortal(
     <div
       ref={panelRef}
       className="kenzy-panel"
@@ -235,33 +254,34 @@ export function DailyReportChat({ open, onClose, employeeName, department, recip
       tabIndex={-1}
       onKeyDown={(event) => { if (event.key === "Escape" && !voice.recording) { event.stopPropagation(); onClose(); } }}
     >
-      <header className="flex items-center gap-3 border-b border-border bg-card px-4 py-3">
+      <header className="kenzy-head">
         <KenzyAvatar size={46} />
         <div className="min-w-0 flex-1">
-          <h2 id="kenzy-title" className="text-base font-bold leading-tight text-foreground">Kenzy</h2>
-          <p role="status" className={cn("flex items-center gap-1.5 truncate text-[13px]", state === "ready" ? "text-muted-foreground" : "font-semibold text-brand-strong")}>
+          <h2 id="kenzy-title" className="text-base font-bold leading-tight">Kenzy</h2>
+          <p role="status" className={cn("kenzy-head-status", state !== "ready" && "font-semibold")}>
             {state === "listening" && <span className="kenzy-rec-dot" aria-hidden="true" />}
-            {(state === "thinking" || state === "writing") && <Loader2 className="size-3.5 animate-spin" aria-hidden="true" />}
-            {statusLabel}
+            {(state === "thinking" || state === "writing") && <Loader2 className="size-3.5 shrink-0 animate-spin" aria-hidden="true" />}
+            <span className="truncate">{statusLabel}</span>
           </p>
         </div>
-        <button type="button" onClick={onClose} className="pp-btn pp-btn-outline" aria-label="Close Kenzy and go back to your report">
+        <button type="button" onClick={onClose} className="kenzy-head-close" aria-label="Close Kenzy and go back to your report">
           <X className="size-5" aria-hidden="true" /><span className="hidden sm:inline">Close</span>
         </button>
       </header>
 
-      <div ref={listRef} className="flex-1 space-y-3 overflow-y-auto bg-background px-4 py-4" aria-live="polite" aria-label="Conversation with Kenzy">
+      <div ref={listRef} className="kenzy-list" aria-live="polite" aria-label="Conversation with Kenzy">
+        <div ref={threadRef} className="kenzy-thread">
         <AssistantBubble>
           <p>
             Hi{firstName ? ` ${firstName}` : ""}! Just tell me about your day. You can type it, or tap <strong>Speak</strong> and talk.
           </p>
-          <p className="mt-2 text-muted-foreground">I'll put everything in the right place in your report. You can still change anything yourself, and nothing is sent to {recipientName || "Madam Ursula"} until you press Submit.</p>
+          <p className="kenzy-muted mt-2">I'll put everything in the right place in your report. You can still change anything yourself, and nothing is sent to {recipientName || "Madam Ursula"} until you press Submit.</p>
         </AssistantBubble>
 
         {messages.map((message) => message.role === "user" ? (
-          <div key={message.id} className="ml-auto max-w-[88%] whitespace-pre-wrap break-words rounded-2xl rounded-tr-sm bg-brand-strong px-4 py-3 text-[15px] leading-relaxed text-white dark:text-[oklch(0.2_0.01_50)]">{message.text}</div>
+          <div key={message.id} data-role="user" className="kenzy-msg-user">{message.text}</div>
         ) : (
-          <AssistantBubble key={message.id} warn={message.tone === "warn"}>
+          <AssistantBubble key={message.id}>
             <p>{message.text}</p>
             {message.proposal && message.proposal.state === "pending" && (
               <>
@@ -281,7 +301,7 @@ export function DailyReportChat({ open, onClose, employeeName, department, recip
               </div>
             )}
             {message.question && <p className="mt-2 font-semibold">{message.question}</p>}
-            {message.notice && <p className="mt-2 text-xs text-muted-foreground">{message.notice}</p>}
+            {message.notice && <p className="kenzy-muted mt-2 text-xs">{message.notice}</p>}
             {message.changed && (
               <div className="mt-3 flex flex-wrap gap-2">
                 <button type="button" onClick={onReview} className="pp-btn pp-btn-primary pp-btn-sm"><ClipboardCheck className="size-4" aria-hidden="true" />Review my report</button>
@@ -293,12 +313,13 @@ export function DailyReportChat({ open, onClose, employeeName, department, recip
 
         {busy && (
           <AssistantBubble>
-            <span role="status" className="flex items-center gap-2 text-muted-foreground"><span className="kenzy-dots" aria-hidden="true"><span /><span /><span /></span>Kenzy is putting your report together…</span>
+            <span role="status" className="kenzy-muted flex items-center gap-2"><span className="kenzy-dots" aria-hidden="true"><span /><span /><span /></span>Kenzy is putting your report together…</span>
           </AssistantBubble>
         )}
+        </div>
       </div>
 
-      <footer className="border-t border-border bg-card p-3 pb-[max(0.75rem,env(safe-area-inset-bottom))]">
+      <footer className="kenzy-foot">
         {recipientError && <p role="alert" className="mb-2 rounded-lg border border-destructive/40 bg-destructive-soft px-3 py-2 text-xs text-destructive">{recipientError}</p>}
 
         {voice.recording || voice.status === "starting" ? (
@@ -321,8 +342,8 @@ export function DailyReportChat({ open, onClose, employeeName, department, recip
           </div>
         ) : (
           <>
-            {reviewing && text.trim() && <p role="status" className="mb-2 rounded-lg bg-brand-wash px-3 py-2 text-[13px] font-medium text-brand-strong">Step 2 of 3 · Check your words below and fix anything that is wrong. Step 3: press <strong>Send</strong>.</p>}
-            <div className="rounded-xl border border-input bg-background focus-within:border-primary focus-within:ring-2 focus-within:ring-primary/25">
+            {reviewing && text.trim() && <p role="status" className="kenzy-step mb-2">Step 2 of 3 · Check your words below and fix anything that is wrong. Step 3: press <strong>Send</strong>.</p>}
+            <div className="kenzy-box">
               <label htmlFor="daily-chat-input" className="sr-only">Tell Kenzy about your day</label>
               <textarea
                 id="daily-chat-input"
@@ -364,7 +385,8 @@ export function DailyReportChat({ open, onClose, employeeName, department, recip
           {text.length > 6000 && <p className="text-muted-foreground">{text.length.toLocaleString()} / 8,000 characters</p>}
         </div>
       </footer>
-    </div>
+    </div>,
+    document.body,
   );
 }
 
@@ -382,10 +404,10 @@ function DraftPreview({ draft }: { draft: StructuredNarrationDraft }) {
     <div className="mt-3 space-y-3 text-sm" aria-label="How Kenzy understood your message">
       {PREVIEW_SECTIONS.map((title) => rows[title].length > 0 && (
         <section key={title}>
-          <h3 className="text-xs font-bold uppercase tracking-wide text-brand-strong">{title}</h3>
+          <h3 className="kenzy-draft-title text-xs font-bold uppercase tracking-wide">{title}</h3>
           <ul className="mt-1 space-y-1.5">
             {rows[title].map((row) => (
-              <li key={row.key} className="rounded-lg border border-border bg-background px-3 py-2">
+              <li key={row.key} className="rounded-lg border border-border bg-card px-3 py-2 text-foreground">
                 {row.updates && <p className="mb-0.5 text-xs font-semibold text-muted-foreground">Updates a row you already have</p>}
                 <dl className="space-y-0.5">
                   {row.fields.filter(([, value]) => value.trim()).map(([label, value]) => (
@@ -398,16 +420,16 @@ function DraftPreview({ draft }: { draft: StructuredNarrationDraft }) {
         </section>
       ))}
       {draft.removeIds.length > 0 && <p className="text-xs font-semibold text-destructive">This will also remove {draft.removeIds.length} {draft.removeIds.length === 1 ? "row" : "rows"} you asked me to cancel.</p>}
-      {draft.challenges.length === 0 && <p className="text-xs text-muted-foreground">No challenges found in what you said.</p>}
+      {draft.challenges.length === 0 && <p className="kenzy-muted text-xs">No challenges found in what you said.</p>}
     </div>
   );
 }
 
-function AssistantBubble({ children, warn = false }: { children: ReactNode; warn?: boolean }) {
+function AssistantBubble({ children }: { children: ReactNode }) {
   return (
-    <div className="flex max-w-[94%] items-start gap-2">
+    <div data-role="assistant" className="flex max-w-[94%] items-start gap-2">
       <KenzyAvatar size={30} className="mt-0.5" />
-      <div className={cn("min-w-0 rounded-2xl rounded-tl-sm border px-4 py-3 text-[15px] leading-relaxed text-foreground", warn ? "border-warning bg-warning-soft" : "border-border bg-card")}>{children}</div>
+      <div className="kenzy-msg-bot">{children}</div>
     </div>
   );
 }

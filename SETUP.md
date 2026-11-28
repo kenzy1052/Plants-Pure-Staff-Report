@@ -7,7 +7,7 @@
      `https://YOUR-SITE/auth` and `https://YOUR-SITE/auth?recovery=1`.
    - Set up custom SMTP (Resend, Brevo…). Built-in email is limited to a few per hour.
 3. **Netlify:** import the project from Git. Build `vite build`, publish `dist/client`
-   (already in `netlify.toml`). Add the 6 variables from `.env.example`
+   (already in `netlify.toml`). Add the variables from `.env.example`
    (Site configuration → Environment variables). Deploy.
 4. Madam Priscilla Yeboah signs up and verifies her email, then in SQL Editor:
    `select public.set_staff_role('her-email', 'ceo');`
@@ -39,19 +39,28 @@ The sign-in screen uses **Enter Password** / **Enter your password**; registrati
 
 The daily report form includes a typed, pasted, or voice narration assistant. Browser speech recognition is used when available. Otherwise the app attempts microphone capture and server transcription; if microphone access, the browser, a provider, or a quota prevents this, the narration remains available for manual editing and manual reporting is not blocked. The assistant never submits a report automatically: extracted activities, pending items, challenges, and next-day plans are placed into the existing editable form for employee review.
 
-AI configuration is optional. The application uses Gemini as the primary report-structuring provider and Groq as its fallback. For voice transcription it uses Groq first and Gemini second. Add the following server environment variables locally and in **Netlify → Site configuration → Environment variables**, then redeploy:
+AI configuration is optional. Report drafting tries **Gemini, then Groq, then DeepSeek**; voice transcription tries **Groq, then Gemini** (DeepSeek has no speech API). A provider is used only if its key is set, and if one fails for any reason (no credit, rate limit, retired model, outage, bad output) the next one answers. Add these server variables locally and in **Netlify → Site configuration → Environment variables**, then redeploy:
 
-- `GEMINI_API_KEY`: key created through [Google AI Studio](https://aistudio.google.com/apikey).
-- `GROQ_API_KEY`: key created at [Groq Console → API Keys](https://console.groq.com/keys).
-- `REPORT_AI_PROVIDER`: `gemini` by default. This is a provider preference, not a credential.
-- `REPORT_AI_MODEL`: `gemini-3.8-flash` by default. The verified Gemini model supports structured JSON output and audio input.
-- `GROQ_REPORT_MODEL`: `llama-3.3-70b-versatile` for report-structuring fallback.
-- `REPORT_TRANSCRIPTION_PROVIDER`: `groq` by default.
-- `REPORT_TRANSCRIPTION_MODEL`: `whisper-large-v3-turbo` for Groq transcription.
-- `GEMINI_TRANSCRIPTION_MODEL`: `gemini-3.5-transcribe` for Gemini transcription fallback.
-- `GROQ_API_URL`: `https://api.groq.com/openai/v1`; the implementation includes `/v1` exactly once.
+| Variable | Default | Notes |
+|---|---|---|
+| `GEMINI_API_KEY` | | From [Google AI Studio](https://aistudio.google.com/apikey). **Use a project with no billing account linked** (see below). |
+| `GROQ_API_KEY` | | From [Groq Console → API Keys](https://console.groq.com/keys). Free tier. |
+| `DEEPSEEK_API_KEY` | | Optional. From [platform.deepseek.com](https://platform.deepseek.com). Pay-as-you-go, very cheap. |
+| `REPORT_AI_PROVIDER` | `gemini` | One name or a list, e.g. `gemini,deepseek,groq`. Unlisted providers follow in the default order. |
+| `REPORT_AI_MODEL` | `gemini-3.1-flash-lite` | Stable, free-tier, accepts audio. |
+| `GROQ_REPORT_MODEL` | `openai/gpt-oss-120b` | `llama-3.3-70b-versatile` was shut down by Groq on 16 Aug 2026. |
+| `DEEPSEEK_REPORT_MODEL` | `deepseek-flash` | The old `deepseek-chat` id is retired. |
+| `REPORT_TRANSCRIPTION_PROVIDER` | `groq` | |
+| `REPORT_TRANSCRIPTION_MODEL` | `whisper-large-v3-turbo` | Groq speech-to-text. |
+| `GEMINI_TRANSCRIPTION_MODEL` | `gemini-3.1-flash-lite` | Gemini has no separate transcription model; a Flash model with audio input is used. |
+| `GROQ_API_URL` | `https://api.groq.com/openai/v1` | `/v1` exactly once. |
+| `DEEPSEEK_API_URL` | `https://api.deepseek.com` | No `/v1`. |
 
-The provider calls are server-only and require an authenticated Supabase employee session. The report endpoint uses Gemini's native JSON structured-output request and Groq's OpenAI-compatible chat endpoint separately. The transcription endpoint uses Groq's multipart audio endpoint and Gemini's native audio `generateContent` request separately; the formats are not mixed. Fallback is real: if the first provider fails for **any** reason (rate limit, quota, outage, timeout, unavailable model, bad/missing key, or invalid/incomplete output) the other provider is tried once. If both fail, the app uses the offline parser and says so on screen. Provider order comes from `REPORT_AI_PROVIDER` (report drafting, default Gemini then Groq) and `REPORT_TRANSCRIPTION_PROVIDER` (speech, default Groq then Gemini). API keys never reach the browser and are redacted from logs and errors.
+**Why Gemini can say "402 prepayment credits are depleted".** The Gemini free tier only applies to projects that are *not* linked to a Google billing account. Once a project is linked (for example by enabling billing or Prepay in AI Studio), it is treated as a paid project and every request returns 402 when the prepaid balance is $0. Fix: in AI Studio → API keys / Projects, either unlink billing from that project, or create a **new project with no billing** and create the key there. Rate limits are per project, not per key.
+
+Model names change. If a provider reports "model does not exist", check the provider's model list and set the matching variable above; no code change is needed.
+
+The provider calls are server-only and require an authenticated Supabase employee session. Gemini uses its native JSON structured-output request; Groq and DeepSeek use OpenAI-compatible chat endpoints (Groq with JSON schema, DeepSeek with JSON mode). Transcription uses Groq's multipart audio endpoint and Gemini's native audio `generateContent`; the formats are not mixed. If every provider fails, the app uses the offline parser and says so on screen. API keys never reach the browser and are redacted from logs and errors.
 
 ## Daily report recipient
 

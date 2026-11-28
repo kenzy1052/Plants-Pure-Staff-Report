@@ -18,7 +18,7 @@ export type NarrationPlanDraft = NarrationDraftPlan;
 export type StructuredNarrationDraft = SharedStructuredNarrationDraft;
 
 export type NarrationSource = "ai" | "local";
-export type AiProviderName = "gemini" | "groq";
+export type AiProviderName = "gemini" | "groq" | "deepseek";
 
 export interface NarrationResult {
   draft: StructuredNarrationDraft;
@@ -32,12 +32,11 @@ export interface NarrationResult {
   warning?: string;
 }
 
-const providerLabel: Record<AiProviderName, string> = { gemini: "Gemini", groq: "Groq" };
+const providerLabel: Record<AiProviderName, string> = { gemini: "Gemini", groq: "Groq", deepseek: "DeepSeek" };
 
 export function describeProvider(provider: AiProviderName, fellBack: boolean): string {
   if (!fellBack) return `Prepared with ${providerLabel[provider]}.`;
-  const primary: AiProviderName = provider === "gemini" ? "groq" : "gemini";
-  return `${providerLabel[primary]} was unavailable, so ${providerLabel[provider]} prepared this draft.`;
+  return `The first AI service was unavailable, so ${providerLabel[provider]} prepared this draft.`;
 }
 
 const LOCAL_NOTICE = "The offline parser prepared this draft instead. It only copies what you wrote — please check every field carefully.";
@@ -65,7 +64,7 @@ export async function structureNarration(input: { narration: string; department:
   } catch (error) {
     // Visible in the browser console (F12) and, for the provider detail, in the server log lines starting with [report-ai].
     console.warn("[Kenzy] The AI could not prepare this draft, so the offline parser was used instead:", error);
-    const reason = error instanceof Error && /Both AI providers/i.test(error.message) ? "Both Gemini and Groq were unavailable." : "The AI service could not be reached.";
+    const reason = error instanceof Error && /AI providers/i.test(error.message) ? "None of the AI services (Gemini, Groq, DeepSeek) could respond." : "The AI service could not be reached.";
     return local(reason);
   }
 }
